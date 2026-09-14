@@ -51,6 +51,11 @@
     .detected { background:#f8f9fa; border-radius:10px; padding:10px; margin-top:10px; }
     .search-results { max-height:300px; overflow:auto; }
     .sticky-actions { position:sticky; bottom:8px; background:rgba(255,255,255,.96); padding:8px; border-radius:12px; box-shadow:0 -2px 10px rgba(0,0,0,.08); margin-top:12px; }
+    .duplicate-panel { border:2px solid #d93025; background:#fff1f0; padding:12px; border-radius:10px; margin:12px 0; }
+    .duplicate-panel .copy-choice { border:1px solid #e0a09a; background:#fff; padding:9px; border-radius:8px; margin:7px 0; }
+    .status-confirmed { color:#137333; font-weight:700; }
+    .status-review { color:#b06000; font-weight:700; }
+    .status-unseen { color:#5f6368; font-weight:700; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -80,7 +85,8 @@
         </div>
         <div class="muted" id="progressText"></div>
         <button id="resumeReviewBtn" class="warnbtn">保留中の人手確認を続ける</button>
-        <button id="downloadNowBtn" class="secondary">現在の総表をXLSXでダウンロード</button>
+        <button id="downloadNowBtn" class="secondary">最新状態の総表をXLSXでダウンロード</button>
+        <div class="muted">ダウンロードするたびに、データベースの最新状態を取得して作成します。</div>
         <div id="homeDownloadStatus" class="statusline muted"></div>
         <button id="refreshBtn" class="secondary">進捗を更新</button>
         <button id="logoutBtn" class="secondary">ログアウト</button>
@@ -95,7 +101,7 @@
         <input id="cameraPhoto" type="file" accept="image/*" capture="environment" />
         <div class="muted" style="margin:6px 0 10px;">↑ カメラで撮影</div>
         <input id="libraryPhoto" type="file" accept="image/*" />
-        <div class="muted" style="margin-top:6px;">↑ 写真ライブラリ／相冊から選択</div>
+        <div class="muted" style="margin-top:6px;">↑ 写真ライブラリから選択</div>
         <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
         <button id="scanBtn">アップロードしてAIで確認</button>
         <div id="scanStatus" class="statusline muted"></div>
@@ -106,7 +112,7 @@
         <div id="summary"></div>
         <div class="muted" style="margin-top:10px;">要確認項目は一致度の高い順に確認します。低得点の候補は自動確定しません。</div>
         <div id="detections"></div>
-        <button id="startCurrentReviewBtn" class="warnbtn">この写真の要確認を開始</button>
+        <button id="startCurrentReviewBtn" class="warnbtn">人手確認へ進む</button>
         <button id="skipCurrentReviewBtn" class="secondary">あとで確認する</button>
       </div>
     </section>
@@ -122,6 +128,12 @@
         <div id="reviewDetected" class="detected"></div>
         <h3>母表候補</h3>
         <div id="candidateList"></div>
+        <div id="duplicatePanel" class="duplicate-panel hidden">
+          <div><strong>重複撮影の可能性があります</strong></div>
+          <div id="duplicateMessage" class="muted" style="margin-top:6px;"></div>
+          <div id="duplicateCopies"></div>
+          <button id="duplicateIgnoreBtn" class="danger">同じ本の重複撮影として登録しない</button>
+        </div>
         <h3>母表を検索</h3>
         <div class="row">
           <input id="bookSearchInput" type="text" placeholder="書名・分類記号・著者記号・資料番号" />
@@ -141,7 +153,7 @@
       <div class="card">
         <h2>確認完了</h2>
         <div id="completeMessage" class="ok">この確認キューは完了しました。総表にはすでに反映されています。</div>
-        <button id="downloadXlsxBtn" class="good">更新済みXLSXをダウンロード</button>
+        <button id="downloadXlsxBtn" class="good">最新状態のXLSXをダウンロード</button>
         <button id="noDownloadBtn" class="secondary">今はダウンロードしない</button>
         <div id="downloadStatus" class="statusline muted"></div>
       </div>
@@ -175,6 +187,25 @@ function esc(s){ return String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':
 function setStatus(id,msg,cls='muted'){ const n=el(id); n.className='statusline '+cls; n.textContent=msg; }
 function pct(x){ return x==null ? '-' : Math.round(Number(x)*100)+'%'; }
 function normalize(s){ return String(s??'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim(); }
+function statusLabel(status){
+  if(status==='confirmed') return '確認済';
+  if(status==='needs_review') return '要確認';
+  return '未確認';
+}
+function statusClass(status){
+  if(status==='confirmed') return 'status-confirmed';
+  if(status==='needs_review') return 'status-review';
+  return 'status-unseen';
+}
+function bibliographicKey(b){
+  if(!b) return '';
+  return [b.title,b.classification_number,b.author_code,b.volume_label].map(normalize).join('|');
+}
+function equivalentCopies(book){
+  const key=bibliographicKey(book);
+  if(!key) return [];
+  return allBooks.filter(x=>x.id!==book.id && bibliographicKey(x)===key);
+}
 
 async function restoreSession(){
   const { data:{session} } = await sb.auth.getSession();
@@ -315,10 +346,10 @@ function renderScanSummary(summary,detections){
     const cand=d.candidate_book_id?allBooksById[d.candidate_book_id]:null;
     return `<div class="result ${d.decision==='auto_confirmed'?'auto':''}">
       <span class="pill">${d.decision==='auto_confirmed'?'自動確認':'要確認'}</span>
-      <span class="pill">score ${pct(d.match_score)}</span>
+      <span class="pill">一致度 ${pct(d.match_score)}</span>
       <div><strong>AI読取：</strong>${esc(d.detected_title||'（書名不明）')}</div>
       <div><strong>請求記号：</strong>${esc(d.detected_call_number||'不明')}</div>
-      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)}</div>`:'<div class="warn">十分に近い母表候補なし</div>'}
+      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${cand.status==='confirmed'?'<div class="warn">⚠ すでに確認済みの候補です。重複撮影の可能性があります。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
     </div>`;
   }).join('');
   el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
@@ -386,10 +417,10 @@ function drawCrop(blob,bbox){
 
 async function renderCurrentReview(){
   if(reviewIndex>=reviewQueue.length) return showComplete();
-  const d=reviewQueue[reviewIndex]; selectedBookId=null; el('bookSearchResults').innerHTML=''; el('bookSearchInput').value='';
-  el('reviewCounter').textContent=`${reviewIndex+1} / ${reviewQueue.length}（高得点順）`;
+  const d=reviewQueue[reviewIndex]; selectedBookId=null; el('duplicatePanel').classList.add('hidden'); el('bookSearchResults').innerHTML=''; el('bookSearchInput').value='';
+  el('reviewCounter').textContent=`${reviewIndex+1} / ${reviewQueue.length}（一致度の高い順）`;
   el('reviewDetected').innerHTML=`
-    <div><span class="pill">score ${pct(d.match_score)}</span><span class="pill">読取 ${esc(d.legibility||'')}</span></div>
+    <div><span class="pill">一致度 ${pct(d.match_score)}</span><span class="pill">読取状態 ${esc(d.legibility||'')}</span></div>
     <div><strong>AI読取書名：</strong>${esc(d.detected_title||'（不明）')}</div>
     <div><strong>著者：</strong>${esc(d.detected_author||'')}</div>
     <div><strong>請求記号：</strong>${esc(d.detected_call_number||'（不明）')}</div>`;
@@ -408,24 +439,26 @@ function getCandidatesForDetection(d){
 
 function candidateHtml(c){
   const b=allBooksById[c.book_id]||c; const low=(c.score??0)<.55;
+  const siblings=equivalentCopies(b);
+  const copyNote=siblings.length ? ` / 同一書誌 ${siblings.length+1}件` : '';
   return `<div class="candidate ${low?'low':''}" data-book-id="${esc(c.book_id)}">
     <label style="margin:0;display:block;cursor:pointer;">
       <input type="radio" name="bookCandidate" value="${esc(c.book_id)}" style="width:auto;margin-right:8px;" />
       <strong>${esc(b.title||'（書名なし）')}</strong>
     </label>
     <div>${esc(b.classification_number||'')} ${esc(b.author_code||'')} ${esc(b.volume_label||'')}</div>
-    <div class="muted">資料番号 ${esc(b.inventory_number||'')} / 一致度 ${pct(c.score)}</div>
+    <div class="muted">資料番号 ${esc(b.inventory_number||'')} / 一致度 ${pct(c.score)}${copyNote}</div>
+    <div class="${statusClass(b.status)}">母表状態：${statusLabel(b.status)}</div>
     <div class="scorebar"><div style="width:${Math.max(0,Math.min(100,Math.round((c.score??0)*100)))}%"></div></div>
   </div>`;
 }
-
 function renderCandidates(d){
   const cs=getCandidatesForDetection(d);
   if(!cs.length){ el('candidateList').innerHTML='<div class="warn">近い候補がありません。母表検索を使うか、「該当なし」を選んでください。</div>'; return; }
   el('candidateList').innerHTML=cs.map(candidateHtml).join('');
   document.querySelectorAll('input[name="bookCandidate"]').forEach(r=>r.addEventListener('change',()=>selectBook(Number(r.value))));
   const top=cs[0];
-  if((top.score??0)>=.55 && allBooksById[top.book_id]?.status!=='confirmed'){
+  if((top.score??0)>=.55){
     const r=document.querySelector(`input[name="bookCandidate"][value="${top.book_id}"]`); if(r){r.checked=true; selectBook(Number(top.book_id));}
   }
 }
@@ -433,6 +466,36 @@ function renderCandidates(d){
 function selectBook(id){
   selectedBookId=id;
   document.querySelectorAll('.candidate').forEach(x=>x.classList.toggle('selected',Number(x.dataset.bookId)===id));
+  renderDuplicateWarning(id);
+}
+
+function renderDuplicateWarning(id){
+  const panel=el('duplicatePanel'), msg=el('duplicateMessage'), copies=el('duplicateCopies');
+  const b=allBooksById[id];
+  if(!b){ panel.classList.add('hidden'); return; }
+  const siblings=equivalentCopies(b);
+  const confirmedGroup=[b,...siblings].filter(x=>x.status==='confirmed');
+  const available=siblings.filter(x=>x.status!=='confirmed');
+  const needsWarning=b.status==='confirmed' || confirmedGroup.length>0 || siblings.length>0;
+  if(!needsWarning){ panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+  if(b.status==='confirmed'){
+    msg.textContent='選択した母表項目はすでに確認済みです。同じ実物を別の写真でもう一度撮影した可能性があります。別の複本であれば、下の未確認資料を選んでください。';
+  }else if(confirmedGroup.length){
+    msg.textContent='同一書誌の別資料がすでに確認済みです。今回の写真が同じ実物の重複撮影か、未確認の別の複本かを確認してください。';
+  }else{
+    msg.textContent='母表に同一書誌の資料が複数あります。資料番号を確認して、該当する1冊を選択してください。';
+  }
+  copies.innerHTML=available.length ? '<div style="margin-top:8px;"><strong>未確認・要確認の同一書誌：</strong></div>'+available.map(x=>`<div class="copy-choice"><button type="button" class="secondary smallbtn duplicate-copy-btn" data-book-id="${x.id}">資料番号 ${esc(x.inventory_number||'不明')} を選択</button><div class="muted">${esc(x.classification_number||'')} ${esc(x.author_code||'')} ${esc(x.volume_label||'')} / ${statusLabel(x.status)}</div></div>`).join('') : '<div class="muted" style="margin-top:8px;">未確認の同一書誌はありません。</div>';
+  copies.querySelectorAll('.duplicate-copy-btn').forEach(btn=>btn.addEventListener('click',()=>{
+    const target=Number(btn.dataset.bookId);
+    selectedBookId=target;
+    const existing=document.querySelector(`input[name="bookCandidate"][value="${target}"]`);
+    if(existing){ existing.checked=true; }
+    document.querySelectorAll('.candidate').forEach(x=>x.classList.toggle('selected',Number(x.dataset.bookId)===target));
+    renderDuplicateWarning(target);
+    setStatus('reviewStatus',`資料番号 ${allBooksById[target]?.inventory_number||''} を選択しました。`,'ok');
+  }));
 }
 
 el('bookSearchBtn').addEventListener('click',()=>{
@@ -448,11 +511,25 @@ el('bookSearchBtn').addEventListener('click',()=>{
 
 el('confirmReviewBtn').addEventListener('click',async()=>{
   if(!selectedBookId) return setStatus('reviewStatus','母表候補を選択してください。候補がない場合は「該当なし」を押してください。','error');
+  if(allBooksById[selectedBookId]?.status==='confirmed'){
+    renderDuplicateWarning(selectedBookId);
+    return setStatus('reviewStatus','この母表項目はすでに確認済みです。重複撮影として除外するか、未確認の別資料を選択してください。','error');
+  }
   const btn=el('confirmReviewBtn'); btn.disabled=true;
   try{
     setStatus('reviewStatus','総表に反映しています…');
     await callFunction({action:'review',detection_id:reviewQueue[reviewIndex].id,outcome:'confirm',book_id:selectedBookId});
-    await loadAllBooks(); reviewIndex++; await renderCurrentReview();
+    await loadAllBooks(); await refreshProgress(); reviewIndex++; await renderCurrentReview();
+  }catch(e){ setStatus('reviewStatus',e.message,'error'); }
+  finally{btn.disabled=false;}
+});
+
+el('duplicateIgnoreBtn').addEventListener('click',async()=>{
+  const btn=el('duplicateIgnoreBtn'); btn.disabled=true;
+  try{
+    setStatus('reviewStatus','重複撮影として記録しています…');
+    await callFunction({action:'review',detection_id:reviewQueue[reviewIndex].id,outcome:'duplicate',book_id:selectedBookId});
+    await loadAllBooks(); await refreshProgress(); reviewIndex++; await renderCurrentReview();
   }catch(e){ setStatus('reviewStatus',e.message,'error'); }
   finally{btn.disabled=false;}
 });
@@ -462,7 +539,7 @@ el('rejectReviewBtn').addEventListener('click',async()=>{
   try{
     setStatus('reviewStatus','該当なしとして記録しています…');
     await callFunction({action:'review',detection_id:reviewQueue[reviewIndex].id,outcome:'reject'});
-    await loadAllBooks(); reviewIndex++; await renderCurrentReview();
+    await loadAllBooks(); await refreshProgress(); reviewIndex++; await renderCurrentReview();
   }catch(e){ setStatus('reviewStatus',e.message,'error'); }
   finally{btn.disabled=false;}
 });
@@ -476,14 +553,15 @@ async function downloadUpdatedXlsx(statusId='downloadStatus'){
     const wb=new ExcelJS.Workbook(); await wb.xlsx.load(buf);
     const ws=wb.getWorksheet('資料リスト'); if(!ws) throw new Error('テンプレートに「資料リスト」シートがありません。');
 
+    const green={type:'pattern',pattern:'solid',fgColor:{argb:'FFC6EFCE'}};
     const yellow={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFE699'}};
     const pink={type:'pattern',pattern:'solid',fgColor:{argb:'FFF4CCCC'}};
     for(const b of allBooks){
       const row=Number(b.source_row); if(!row||row<2) continue;
       const cell=ws.getCell(`C${row}`);
+      cell.alignment={...(cell.alignment||{}),horizontal:'center',vertical:'middle'};
       if(b.status==='confirmed'){
-        cell.value='○';
-        cell.alignment={...(cell.alignment||{}),horizontal:'center',vertical:'middle'};
+        cell.value='○'; cell.fill=green;
       }else if(b.status==='needs_review'){
         cell.value=''; cell.fill=yellow;
       }else{
@@ -495,7 +573,7 @@ async function downloadUpdatedXlsx(statusId='downloadStatus'){
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
     const d=new Date(); const stamp=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}`;
     a.download=`公用貸出実査リスト_更新_${stamp}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-    setStatus(statusId,'XLSXを作成しました。○=確認済、黄色=要確認、ピンク=未確認です。','ok');
+    setStatus(statusId,'最新状態のXLSXを作成しました。緑（○）=確認済、黄色=要確認、ピンク=未確認です。','ok');
   }catch(e){ setStatus(statusId,'XLSX作成エラー: '+e.message,'error'); throw e; }
 }
 
