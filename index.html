@@ -5,36 +5,53 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>図書実査スキャナー</title>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <style>
     :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f6f7f9; color: #202124; }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 18px; }
-    h1 { font-size: 1.45rem; margin: 0 0 10px; }
-    h2 { font-size: 1.05rem; margin-top: 22px; }
-    .card { background: white; border-radius: 14px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 5px rgba(0,0,0,.08); }
-    label { display:block; font-weight: 600; margin: 10px 0 6px; }
-    input, button { width: 100%; box-sizing: border-box; font-size: 16px; border-radius: 10px; }
-    input { border: 1px solid #cfd3d8; padding: 12px; background: white; }
-    input[type=file] { padding: 10px; }
-    button { border: 0; padding: 13px; margin-top: 10px; background: #1f6feb; color: white; font-weight: 700; cursor: pointer; }
-    button.secondary { background: #5f6368; }
-    button:disabled { opacity: .55; cursor: wait; }
+    body { margin:0; background:#f6f7f9; color:#202124; }
+    .wrap { max-width:820px; margin:0 auto; padding:18px; }
+    h1 { font-size:1.45rem; margin:0 0 8px; }
+    h2 { font-size:1.08rem; margin:0 0 12px; }
+    h3 { font-size:1rem; margin:12px 0 6px; }
+    .card { background:#fff; border-radius:14px; padding:16px; margin:12px 0; box-shadow:0 1px 5px rgba(0,0,0,.08); }
+    label { display:block; font-weight:650; margin:10px 0 6px; }
+    input, button { width:100%; box-sizing:border-box; font-size:16px; border-radius:10px; }
+    input { border:1px solid #cfd3d8; padding:12px; background:#fff; }
+    input[type=file] { padding:10px; }
+    button { border:0; padding:13px; margin-top:10px; background:#1f6feb; color:#fff; font-weight:700; cursor:pointer; }
+    button.secondary { background:#5f6368; }
+    button.good { background:#137333; }
+    button.warnbtn { background:#b06000; }
+    button.danger { background:#b3261e; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .smallbtn { width:auto; padding:8px 12px; margin:5px 6px 0 0; }
     .hidden { display:none !important; }
     .muted { color:#6b7280; font-size:.9rem; }
     .ok { color:#137333; }
     .warn { color:#b06000; }
-    .error { color:#b3261e; white-space: pre-wrap; }
-    .progress { display:grid; grid-template-columns: repeat(3,1fr); gap:8px; margin-top:10px; }
+    .error { color:#b3261e; white-space:pre-wrap; }
+    .statusline { min-height:1.4em; margin-top:10px; }
+    .progress { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
     .metric { background:#f1f3f4; padding:10px; border-radius:10px; text-align:center; }
     .metric strong { display:block; font-size:1.2rem; }
+    .thumb { max-width:100%; border-radius:10px; margin-top:8px; }
     .result { border-left:5px solid #f4b400; padding:10px 12px; background:#fff8dd; border-radius:8px; margin:10px 0; }
     .result.auto { border-left-color:#34a853; background:#eef8f0; }
-    .result .title { font-weight:700; }
-    .candidate { margin-top:8px; padding-top:8px; border-top:1px solid rgba(0,0,0,.08); }
-    .thumb { max-width:100%; border-radius:10px; margin-top:8px; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#e8eaed; font-size:.8rem; margin-right:5px; }
-    .statusline { min-height: 1.4em; margin-top:10px; }
-    .smallbtn { width:auto; padding:8px 12px; margin-right:8px; margin-top:8px; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; background:#e8eaed; font-size:.8rem; margin:2px 5px 2px 0; }
+    .candidate { border:1px solid #e0e0e0; border-radius:10px; padding:10px; margin:8px 0; background:#fff; }
+    .candidate.selected { border:2px solid #1f6feb; background:#f3f7ff; }
+    .candidate.low { border-color:#f4b400; background:#fff8dd; }
+    .scorebar { height:8px; background:#eceff1; border-radius:99px; overflow:hidden; margin-top:5px; }
+    .scorebar > div { height:100%; background:#1f6feb; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .row > * { flex:1 1 180px; }
+    .review-head { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .review-head > * { margin:0; }
+    #cropCanvas { width:100%; max-height:430px; object-fit:contain; background:#eee; border-radius:10px; }
+    .detected { background:#f8f9fa; border-radius:10px; padding:10px; margin-top:10px; }
+    .search-results { max-height:300px; overflow:auto; }
+    .sticky-actions { position:sticky; bottom:8px; background:rgba(255,255,255,.96); padding:8px; border-radius:12px; box-shadow:0 -2px 10px rgba(0,0,0,.08); margin-top:12px; }
+    @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -53,40 +70,82 @@
   </section>
 
   <section id="app" class="hidden">
-    <div class="card">
-      <div><strong id="userEmail"></strong></div>
-      <div class="progress">
-        <div class="metric">確認済<strong id="confirmedCount">-</strong></div>
-        <div class="metric">要確認<strong id="reviewCount">-</strong></div>
-        <div class="metric">未確認<strong id="unseenCount">-</strong></div>
+    <section id="homeScreen">
+      <div class="card">
+        <div><strong id="userEmail"></strong></div>
+        <div class="progress">
+          <div class="metric">確認済<strong id="confirmedCount">-</strong></div>
+          <div class="metric">人手確認待ち<strong id="reviewCount">-</strong></div>
+          <div class="metric">未確認<strong id="unseenCount">-</strong></div>
+        </div>
+        <div class="muted" id="progressText"></div>
+        <button id="resumeReviewBtn" class="warnbtn">保留中の人手確認を続ける</button>
+        <button id="downloadNowBtn" class="secondary">現在の総表をXLSXでダウンロード</button>
+        <div id="homeDownloadStatus" class="statusline muted"></div>
+        <button id="refreshBtn" class="secondary">進捗を更新</button>
+        <button id="logoutBtn" class="secondary">ログアウト</button>
       </div>
-      <button id="refreshBtn" class="secondary">進捗を更新</button>
-      <button id="logoutBtn" class="secondary">ログアウト</button>
-    </div>
 
-    <div class="card">
-      <h2>写真をアップロード</h2>
-      <label for="shelfLabel">棚番号・場所（任意）</label>
-      <input id="shelfLabel" type="text" placeholder="例：A-03 上段" />
+      <div class="card">
+        <h2>写真をアップロード</h2>
+        <label for="shelfLabel">棚番号・場所（任意）</label>
+        <input id="shelfLabel" type="text" placeholder="例：A-03 上段" />
+        <label>写真</label>
+        <div class="muted">カメラで撮影、または写真ライブラリから選択できます。</div>
+        <input id="cameraPhoto" type="file" accept="image/*" capture="environment" />
+        <div class="muted" style="margin:6px 0 10px;">↑ カメラで撮影</div>
+        <input id="libraryPhoto" type="file" accept="image/*" />
+        <div class="muted" style="margin-top:6px;">↑ 写真ライブラリ／相冊から選択</div>
+        <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
+        <button id="scanBtn">アップロードしてAIで確認</button>
+        <div id="scanStatus" class="statusline muted"></div>
+      </div>
 
-      <label>写真</label>
-      <div class="muted">カメラで新しく撮るか、スマホの写真ライブラリから選んでください。</div>
-      <input id="cameraPhoto" type="file" accept="image/*" capture="environment" />
-      <div class="muted" style="margin:6px 0 10px;">↑ カメラで撮影</div>
-      <input id="libraryPhoto" type="file" accept="image/*" />
-      <div class="muted" style="margin-top:6px;">↑ 写真ライブラリ／相冊から選択</div>
-      <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
+      <div id="summaryCard" class="card hidden">
+        <h2>解析結果</h2>
+        <div id="summary"></div>
+        <div class="muted" style="margin-top:10px;">要確認項目は一致度の高い順に確認します。低得点の候補は自動確定しません。</div>
+        <div id="detections"></div>
+        <button id="startCurrentReviewBtn" class="warnbtn">この写真の要確認を開始</button>
+        <button id="skipCurrentReviewBtn" class="secondary">あとで確認する</button>
+      </div>
+    </section>
 
-      <button id="testFunctionBtn" class="secondary">Edge Function 接続テスト</button>
-      <button id="scanBtn">アップロードしてAIで確認</button>
-      <div id="scanStatus" class="statusline muted"></div>
-    </div>
+    <section id="reviewScreen" class="hidden">
+      <div class="card">
+        <div class="review-head">
+          <h2>人手確認</h2>
+          <div id="reviewCounter" class="muted"></div>
+        </div>
+        <div class="muted">一致度の高いものから順番に表示します。候補が明らかに違う場合は無理に選ばず「該当なし」を押してください。</div>
+        <canvas id="cropCanvas"></canvas>
+        <div id="reviewDetected" class="detected"></div>
+        <h3>母表候補</h3>
+        <div id="candidateList"></div>
+        <h3>母表を検索</h3>
+        <div class="row">
+          <input id="bookSearchInput" type="text" placeholder="書名・分類記号・著者記号・資料番号" />
+          <button id="bookSearchBtn" class="secondary smallbtn">検索</button>
+        </div>
+        <div id="bookSearchResults" class="search-results"></div>
+        <div class="sticky-actions">
+          <button id="confirmReviewBtn" class="good">選択した本で確認</button>
+          <button id="rejectReviewBtn" class="danger">該当なし／未発見のまま</button>
+          <button id="backHomeBtn" class="secondary">中断してホームへ戻る</button>
+          <div id="reviewStatus" class="statusline muted"></div>
+        </div>
+      </div>
+    </section>
 
-    <div id="summaryCard" class="card hidden">
-      <h2>解析結果</h2>
-      <div id="summary"></div>
-      <div id="detections"></div>
-    </div>
+    <section id="completeScreen" class="hidden">
+      <div class="card">
+        <h2>確認完了</h2>
+        <div id="completeMessage" class="ok">この確認キューは完了しました。総表にはすでに反映されています。</div>
+        <button id="downloadXlsxBtn" class="good">更新済みXLSXをダウンロード</button>
+        <button id="noDownloadBtn" class="secondary">今はダウンロードしない</button>
+        <div id="downloadStatus" class="statusline muted"></div>
+      </div>
+    </section>
   </section>
 </div>
 
@@ -95,297 +154,354 @@ const SUPABASE_URL = 'https://ouokjjfjiivdsyyzydsu.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_lx7GbjmaxtqXGfM9zRLe4w_2fZTPFGk';
 const BUCKET = 'library-scans';
 const FUNCTION_NAME = 'library-scan-v2';
+const TEMPLATE_PATH = './master_template.xlsx';
+const TOTAL_BOOKS = 4141;
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-
-const el = (id) => document.getElementById(id);
-const loginCard = el('loginCard');
-const app = el('app');
+const el = id => document.getElementById(id);
 let currentUser = null;
-let resizedBlob = null;
 let selectedFile = null;
+let resizedBlob = null;
+let currentScanId = null;
+let currentScanImagePath = null;
+let reviewQueue = [];
+let reviewIndex = 0;
+let selectedBookId = null;
+let allBooks = [];
+let allBooksById = {};
+let imageCache = new Map();
 
-function esc(s) {
-  return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function esc(s){ return String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function setStatus(id,msg,cls='muted'){ const n=el(id); n.className='statusline '+cls; n.textContent=msg; }
+function pct(x){ return x==null ? '-' : Math.round(Number(x)*100)+'%'; }
+function normalize(s){ return String(s??'').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim(); }
+
+async function restoreSession(){
+  const { data:{session} } = await sb.auth.getSession();
+  if(session?.user){ currentUser=session.user; await enterApp(); }
 }
 
-function setStatus(id, msg, cls='muted') {
-  const node = el(id);
-  node.className = 'statusline ' + cls;
-  node.textContent = msg;
-}
-
-async function restoreSession() {
-  const { data: { session } } = await sb.auth.getSession();
-  if (session?.user) {
-    currentUser = session.user;
-    enterApp();
-  }
-}
-
-async function enterApp() {
-  loginCard.classList.add('hidden');
-  app.classList.remove('hidden');
-  el('userEmail').textContent = currentUser.email ?? 'ログイン中';
+async function enterApp(){
+  el('loginCard').classList.add('hidden');
+  el('app').classList.remove('hidden');
+  el('userEmail').textContent=currentUser.email ?? 'ログイン中';
+  await loadAllBooks();
   await refreshProgress();
 }
 
-el('loginBtn').addEventListener('click', async () => {
-  const email = el('email').value.trim();
-  const password = el('password').value;
-  if (!email || !password) return setStatus('loginStatus', 'メールアドレスとパスワードを入力してください。', 'error');
-  el('loginBtn').disabled = true;
-  setStatus('loginStatus', 'ログイン中…');
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  el('loginBtn').disabled = false;
-  if (error) return setStatus('loginStatus', error.message, 'error');
-  currentUser = data.user;
-  setStatus('loginStatus', 'ログインしました。', 'ok');
-  await enterApp();
+el('loginBtn').addEventListener('click', async()=>{
+  const email=el('email').value.trim(), password=el('password').value;
+  if(!email||!password) return setStatus('loginStatus','メールアドレスとパスワードを入力してください。','error');
+  el('loginBtn').disabled=true; setStatus('loginStatus','ログイン中…');
+  const {data,error}=await sb.auth.signInWithPassword({email,password});
+  el('loginBtn').disabled=false;
+  if(error) return setStatus('loginStatus',error.message,'error');
+  currentUser=data.user; await enterApp();
 });
 
-el('logoutBtn').addEventListener('click', async () => {
-  await sb.auth.signOut();
-  currentUser = null;
-  app.classList.add('hidden');
-  loginCard.classList.remove('hidden');
-});
+el('logoutBtn').addEventListener('click',async()=>{ await sb.auth.signOut(); location.reload(); });
+el('refreshBtn').addEventListener('click',refreshProgress);
 
-el('refreshBtn').addEventListener('click', refreshProgress);
-
-async function countByStatus(status) {
-  const { count, error } = await sb
-    .from('books')
-    .select('id', { count: 'exact', head: true })
-    .eq('status', status);
-  if (error) throw error;
-  return count ?? 0;
+async function loadAllBooks(){
+  const rows=[]; const step=1000;
+  for(let from=0;;from+=step){
+    const {data,error}=await sb.from('books')
+      .select('id,source_row,item_number,inventory_number,title,classification_number,author_code,volume_label,status')
+      .range(from,from+step-1);
+    if(error) throw error;
+    rows.push(...(data??[]));
+    if(!data || data.length<step) break;
+  }
+  allBooks=rows;
+  allBooksById=Object.fromEntries(rows.map(b=>[b.id,b]));
 }
 
-async function refreshProgress() {
-  try {
-    const [confirmed, review, unseen] = await Promise.all([
-      countByStatus('confirmed'),
-      countByStatus('needs_review'),
-      countByStatus('unseen')
-    ]);
-    el('confirmedCount').textContent = confirmed;
-    el('reviewCount').textContent = review;
-    el('unseenCount').textContent = unseen;
-  } catch (e) {
-    console.error(e);
-  }
+async function countBooks(status){
+  const {count,error}=await sb.from('books').select('id',{count:'exact',head:true}).eq('status',status);
+  if(error) throw error; return count??0;
+}
+async function countPendingDetections(){
+  const {count,error}=await sb.from('detections').select('id',{count:'exact',head:true}).eq('decision','needs_review');
+  if(error) throw error; return count??0;
+}
+async function refreshProgress(){
+  try{
+    const [confirmed,pending,unseen]=await Promise.all([countBooks('confirmed'),countPendingDetections(),countBooks('unseen')]);
+    el('confirmedCount').textContent=confirmed; el('reviewCount').textContent=pending; el('unseenCount').textContent=unseen;
+    el('progressText').textContent=`${confirmed} / ${TOTAL_BOOKS} 冊確認済み（${(confirmed/TOTAL_BOOKS*100).toFixed(1)}%）`;
+  }catch(e){ console.error(e); }
 }
 
-async function prepareSelectedPhoto(file, sourceInputId) {
-  selectedFile = file ?? null;
-  resizedBlob = null;
-
-  // 片方を選んだら、もう片方の選択状態をクリアする
-  if (sourceInputId === 'cameraPhoto') el('libraryPhoto').value = '';
-  if (sourceInputId === 'libraryPhoto') el('cameraPhoto').value = '';
-
-  if (!selectedFile) {
-    el('preview').classList.add('hidden');
-    return;
-  }
-
-  setStatus('scanStatus', '画像を準備しています…');
-  try {
-    resizedBlob = await resizeImage(selectedFile, 2000, 0.85);
-    el('preview').src = URL.createObjectURL(resizedBlob);
-    el('preview').classList.remove('hidden');
-    setStatus('scanStatus', `準備完了（約 ${(resizedBlob.size/1024/1024).toFixed(2)} MB）`, 'ok');
-  } catch (e) {
-    console.error(e);
-    selectedFile = null;
-    setStatus('scanStatus', '画像の準備に失敗しました: ' + e.message, 'error');
-  }
-}
-
-el('cameraPhoto').addEventListener('change', async (ev) => {
-  await prepareSelectedPhoto(ev.target.files?.[0], 'cameraPhoto');
-});
-
-el('libraryPhoto').addEventListener('change', async (ev) => {
-  await prepareSelectedPhoto(ev.target.files?.[0], 'libraryPhoto');
-});
-
-function resizeImage(file, maxSide=2000, quality=0.85) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      try {
-        let w = img.naturalWidth, h = img.naturalHeight;
-        const scale = Math.min(1, maxSide / Math.max(w, h));
-        w = Math.round(w * scale); h = Math.round(h * scale);
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob(blob => {
-          URL.revokeObjectURL(url);
-          if (!blob) return reject(new Error('JPEG変換に失敗しました'));
-          resolve(blob);
-        }, 'image/jpeg', quality);
-      } catch (e) { reject(e); }
+function resizeImage(file,maxSide=2000,quality=.86){
+  return new Promise((resolve,reject)=>{
+    const img=new Image(), url=URL.createObjectURL(file);
+    img.onload=()=>{
+      try{
+        let w=img.naturalWidth,h=img.naturalHeight; const scale=Math.min(1,maxSide/Math.max(w,h));
+        w=Math.round(w*scale); h=Math.round(h*scale);
+        const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h;
+        canvas.getContext('2d').drawImage(img,0,0,w,h);
+        canvas.toBlob(blob=>{ URL.revokeObjectURL(url); blob?resolve(blob):reject(new Error('JPEG変換失敗')); },'image/jpeg',quality);
+      }catch(e){reject(e)}
     };
-    img.onerror = () => reject(new Error('画像を読み込めませんでした'));
-    img.src = url;
+    img.onerror=()=>reject(new Error('画像を読み込めませんでした')); img.src=url;
   });
 }
 
+async function preparePhoto(file,source){
+  selectedFile=file??null; resizedBlob=null;
+  if(source==='camera') el('libraryPhoto').value=''; else el('cameraPhoto').value='';
+  if(!selectedFile){ el('preview').classList.add('hidden'); return; }
+  setStatus('scanStatus','画像を準備しています…');
+  try{
+    resizedBlob=await resizeImage(selectedFile);
+    el('preview').src=URL.createObjectURL(resizedBlob); el('preview').classList.remove('hidden');
+    setStatus('scanStatus',`準備完了（約 ${(resizedBlob.size/1024/1024).toFixed(2)} MB）`,'ok');
+  }catch(e){ setStatus('scanStatus','画像準備に失敗: '+e.message,'error'); }
+}
+el('cameraPhoto').addEventListener('change',e=>preparePhoto(e.target.files?.[0],'camera'));
+el('libraryPhoto').addEventListener('change',e=>preparePhoto(e.target.files?.[0],'library'));
 
-async function callLibraryScan(payload) {
-  const { data: { session }, error: sessionError } = await sb.auth.getSession();
-  if (sessionError) throw new Error('ログインセッション取得失敗: ' + sessionError.message);
-  if (!session?.access_token) throw new Error('ログインセッションがありません。いったんログアウトして再ログインしてください。');
-
-  const url = `${SUPABASE_URL}/functions/v1/${FUNCTION_NAME}`;
-  let resp;
-  try {
-    resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_PUBLISHABLE_KEY,
-        'Authorization': `Bearer ${session.access_token}`
-      },
-      body: JSON.stringify(payload)
-    });
-  } catch (e) {
-    throw new Error(`Edge Functionへ通信できませんでした。URL: ${url} / ${e?.message ?? e}`);
-  }
-
-  const raw = await resp.text();
-  let data = null;
-  try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = { raw }; }
-
-  if (!resp.ok) {
-    const detail = data?.error || data?.message || data?.raw || raw || '(本文なし)';
-    throw new Error(`Edge Function HTTP ${resp.status}: ${detail}`);
-  }
+async function callFunction(payload){
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session?.access_token) throw new Error('ログインセッションがありません。再ログインしてください。');
+  const resp=await fetch(`${SUPABASE_URL}/functions/v1/${FUNCTION_NAME}`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','apikey':SUPABASE_PUBLISHABLE_KEY,'Authorization':`Bearer ${session.access_token}`},
+    body:JSON.stringify(payload)
+  });
+  const raw=await resp.text(); let data={};
+  try{data=raw?JSON.parse(raw):{}}catch(_){data={raw}}
+  if(!resp.ok) throw new Error(data?.error || data?.message || raw || `HTTP ${resp.status}`);
   return data;
 }
 
-el('testFunctionBtn').addEventListener('click', async () => {
-  const btn = el('testFunctionBtn');
-  btn.disabled = true;
-  setStatus('scanStatus', 'Edge Functionとの接続を確認しています…');
-  try {
-    // 空の imagePath を送る。認証と通信が通れば、Function側から 400 imagePath is required が返る。
-    const { data: { session } } = await sb.auth.getSession();
-    if (!session?.access_token) throw new Error('ログインセッションがありません。');
-    const url = `${SUPABASE_URL}/functions/v1/${FUNCTION_NAME}`;
-    let resp;
-    try {
-      resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': SUPABASE_PUBLISHABLE_KEY,
-          'Authorization': `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({})
-      });
-    } catch (e) {
-      throw new Error(`通信自体に失敗しました: ${e?.message ?? e}`);
-    }
-    const raw = await resp.text();
-    // HTTP 400 + imagePath is required は、接続・認証・CORSすべて成功のサイン。
-    if (resp.status === 400 && raw.includes('imagePath is required')) {
-      setStatus('scanStatus', '接続テスト成功：GitHub Pages → Supabase Edge Function の通信と認証は正常です。', 'ok');
-    } else {
-      setStatus('scanStatus', `接続テスト結果：HTTP ${resp.status} / ${raw || '(本文なし)'}`, resp.ok ? 'ok' : 'error');
-    }
-  } catch (e) {
-    setStatus('scanStatus', '接続テスト失敗：' + (e.message ?? String(e)), 'error');
-  } finally {
-    btn.disabled = false;
-  }
-});
+el('scanBtn').addEventListener('click',async()=>{
+  if(!currentUser || !selectedFile || !resizedBlob) return setStatus('scanStatus','写真を選択してください。','error');
+  const btn=el('scanBtn'); btn.disabled=true; el('summaryCard').classList.add('hidden');
+  try{
+    setStatus('scanStatus','1/4 写真をアップロードしています…');
+    const ymd=new Date().toISOString().slice(0,10);
+    const path=`${currentUser.id}/${ymd}/${crypto.randomUUID()}.jpg`;
+    const {error:uploadError}=await sb.storage.from(BUCKET).upload(path,resizedBlob,{contentType:'image/jpeg',upsert:false});
+    if(uploadError) throw uploadError;
 
-el('scanBtn').addEventListener('click', async () => {
-  if (!currentUser) return;
-  const file = selectedFile;
-  if (!file) return setStatus('scanStatus', 'カメラで撮影するか、写真ライブラリから写真を選んでください。', 'error');
-  if (!resizedBlob) return setStatus('scanStatus', '画像の準備が終わるまで少しお待ちください。', 'error');
+    setStatus('scanStatus','2/4 スキャン記録を作成しています…');
+    const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,shelf_label:el('shelfLabel').value.trim(),image_path:path}).select().single();
+    if(scanError) throw scanError;
+    currentScanId=scan.id; currentScanImagePath=path;
 
-  const btn = el('scanBtn');
-  btn.disabled = true;
-  el('summaryCard').classList.add('hidden');
-  setStatus('scanStatus', '1/3 写真をアップロードしています…');
+    setStatus('scanStatus','3/4 AIが本を認識して母表と照合しています…');
+    const result=await callFunction({action:'analyze',scan_id:scan.id,storage_path:path});
 
-  try {
-    const d = new Date();
-    const ymd = d.toISOString().slice(0,10);
-    const path = `${currentUser.id}/${ymd}/${crypto.randomUUID()}.jpg`;
-
-    const { error: uploadError } = await sb.storage
-      .from(BUCKET)
-      .upload(path, resizedBlob, { contentType: 'image/jpeg', upsert: false });
-    if (uploadError) throw uploadError;
-
-    setStatus('scanStatus', '2/3 AIが本を認識しています…（少し時間がかかります）');
-    const data = await callLibraryScan({
-      imagePath: path,
-      shelfLabel: el('shelfLabel').value.trim()
-    });
-    if (data?.error) throw new Error(data.error);
-
-    setStatus('scanStatus', '3/3 候補を読み込んでいます…');
-    const detections = data?.detections ?? [];
-    const ids = [...new Set(detections.map(x => x.candidate_book_id).filter(Boolean))];
-    let candidates = {};
-    if (ids.length) {
-      const { data: books, error: bookError } = await sb
-        .from('books')
-        .select('id,title,author,call_number,volume,status,source_row')
-        .in('id', ids);
-      if (bookError) throw bookError;
-      candidates = Object.fromEntries((books ?? []).map(b => [b.id, b]));
-    }
-
-    renderResults(data.summary ?? {}, detections, candidates);
-    setStatus('scanStatus', '解析が完了しました。', 'ok');
+    setStatus('scanStatus','4/4 結果を反映しています…');
+    await loadAllBooks();
     await refreshProgress();
-  } catch (e) {
-    console.error(e);
-    const extra = e?.context?.body ? `\n${JSON.stringify(e.context.body)}` : '';
-    setStatus('scanStatus', 'エラー: ' + (e.message ?? String(e)) + extra, 'error');
-  } finally {
-    btn.disabled = false;
-  }
+    renderScanSummary(result.summary??{}, result.detections??[]);
+    setStatus('scanStatus','解析完了。総表の状態にも反映されました。','ok');
+  }catch(e){ console.error(e); setStatus('scanStatus','エラー: '+(e.message??String(e)),'error'); }
+  finally{ btn.disabled=false; }
 });
 
-function renderResults(summary, detections, candidates) {
+function renderScanSummary(summary,detections){
   el('summaryCard').classList.remove('hidden');
-  el('summary').innerHTML = `
-    <div class="progress">
-      <div class="metric">検出<strong>${esc(summary.total_detected ?? detections.length)}</strong></div>
-      <div class="metric">自動確認<strong>${esc(summary.auto_confirmed ?? 0)}</strong></div>
-      <div class="metric">要確認<strong>${esc(summary.needs_review ?? 0)}</strong></div>
-    </div>`;
-
-  el('detections').innerHTML = detections.map((d, i) => {
-    const b = candidates[d.candidate_book_id];
-    const auto = d.decision === 'auto_confirmed';
-    return `<div class="result ${auto ? 'auto' : ''}">
-      <div><span class="pill">左から ${i+1}</span><span class="pill">score ${esc(d.match_score ?? 0)}</span></div>
-      <div class="title">AI読取：${esc(d.detected_title || '（書名不明）')}</div>
-      <div>${esc(d.detected_author || '')}</div>
-      <div><strong>請求記号：</strong>${esc(d.detected_call_number || '不明')}</div>
-      <div><strong>判定：</strong>${esc(d.decision)}</div>
-      ${b ? `<div class="candidate">
-        <div><strong>母表候補：</strong>${esc(b.title || '（書名なし）')}</div>
-        <div>${esc(b.author || '')}</div>
-        <div><strong>請求記号：</strong>${esc(b.call_number || '')}</div>
-        <div class="muted">books.id=${esc(b.id)} / 元Excel行=${esc(b.source_row ?? '')} / 現在=${esc(b.status)}</div>
-      </div>` : '<div class="candidate warn">母表候補なし</div>'}
+  el('summary').innerHTML=`<div class="progress">
+    <div class="metric">検出<strong>${esc(summary.total_detected??detections.length)}</strong></div>
+    <div class="metric">自動確認<strong>${esc(summary.auto_confirmed??0)}</strong></div>
+    <div class="metric">要確認<strong>${esc(summary.needs_review??0)}</strong></div>
+  </div>`;
+  const sorted=[...detections].sort((a,b)=>(b.match_score??-1)-(a.match_score??-1));
+  el('detections').innerHTML=sorted.map((d,i)=>{
+    const cand=d.candidate_book_id?allBooksById[d.candidate_book_id]:null;
+    return `<div class="result ${d.decision==='auto_confirmed'?'auto':''}">
+      <span class="pill">${d.decision==='auto_confirmed'?'自動確認':'要確認'}</span>
+      <span class="pill">score ${pct(d.match_score)}</span>
+      <div><strong>AI読取：</strong>${esc(d.detected_title||'（書名不明）')}</div>
+      <div><strong>請求記号：</strong>${esc(d.detected_call_number||'不明')}</div>
+      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)}</div>`:'<div class="warn">十分に近い母表候補なし</div>'}
     </div>`;
   }).join('');
+  el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
 }
+
+el('startCurrentReviewBtn').addEventListener('click',()=>startReview({scanId:currentScanId}));
+el('skipCurrentReviewBtn').addEventListener('click',()=>{ el('summaryCard').classList.add('hidden'); });
+el('resumeReviewBtn').addEventListener('click',()=>startReview({scanId:null}));
+el('backHomeBtn').addEventListener('click',showHome);
+
+async function startReview({scanId=null}={}){
+  try{
+    setStatus('scanStatus','要確認データを読み込んでいます…');
+    let q=sb.from('detections').select('id,scan_id,detected_title,detected_author,detected_call_number,candidate_book_id,match_score,decision,bbox,legibility,raw_detected,candidates').eq('decision','needs_review');
+    if(scanId) q=q.eq('scan_id',scanId);
+    const {data,error}=await q.order('match_score',{ascending:false,nullsFirst:false}).limit(500);
+    if(error) throw error;
+    reviewQueue=data??[]; reviewIndex=0;
+    if(!reviewQueue.length){ return showComplete('要確認項目はありません。'); }
+    showReview(); await renderCurrentReview();
+  }catch(e){ setStatus('scanStatus','要確認の読込エラー: '+e.message,'error'); }
+}
+
+function showHome(){
+  el('reviewScreen').classList.add('hidden'); el('completeScreen').classList.add('hidden'); el('homeScreen').classList.remove('hidden');
+  refreshProgress();
+}
+function showReview(){
+  el('homeScreen').classList.add('hidden'); el('completeScreen').classList.add('hidden'); el('reviewScreen').classList.remove('hidden');
+}
+function showComplete(msg='この確認キューは完了しました。'){
+  el('homeScreen').classList.add('hidden'); el('reviewScreen').classList.add('hidden'); el('completeScreen').classList.remove('hidden');
+  el('completeMessage').textContent=msg+' 総表にはすでに反映されています。';
+  refreshProgress();
+}
+
+async function getScanImage(scanId){
+  if(imageCache.has(scanId)) return imageCache.get(scanId);
+  const {data:scan,error}=await sb.from('scans').select('image_path').eq('id',scanId).single();
+  if(error) throw error;
+  const {data:blob,error:dlError}=await sb.storage.from(BUCKET).download(scan.image_path);
+  if(dlError) throw dlError;
+  imageCache.set(scanId,blob); return blob;
+}
+
+function drawCrop(blob,bbox){
+  return new Promise((resolve,reject)=>{
+    const img=new Image(), url=URL.createObjectURL(blob);
+    img.onload=()=>{
+      try{
+        const c=el('cropCanvas'), ctx=c.getContext('2d');
+        let sx=0,sy=0,sw=img.naturalWidth,sh=img.naturalHeight;
+        if(bbox && Number.isFinite(bbox.left)){
+          const pad=20;
+          const l=Math.max(0,bbox.left-pad), t=Math.max(0,bbox.top-pad), r=Math.min(1000,bbox.right+pad), b=Math.min(1000,bbox.bottom+pad);
+          sx=img.naturalWidth*l/1000; sy=img.naturalHeight*t/1000; sw=img.naturalWidth*(r-l)/1000; sh=img.naturalHeight*(b-t)/1000;
+        }
+        const maxW=1200; const scale=Math.min(1,maxW/sw); c.width=Math.max(1,Math.round(sw*scale)); c.height=Math.max(1,Math.round(sh*scale));
+        ctx.drawImage(img,sx,sy,sw,sh,0,0,c.width,c.height); URL.revokeObjectURL(url); resolve();
+      }catch(e){reject(e)}
+    };
+    img.onerror=()=>reject(new Error('画像表示に失敗')); img.src=url;
+  });
+}
+
+async function renderCurrentReview(){
+  if(reviewIndex>=reviewQueue.length) return showComplete();
+  const d=reviewQueue[reviewIndex]; selectedBookId=null; el('bookSearchResults').innerHTML=''; el('bookSearchInput').value='';
+  el('reviewCounter').textContent=`${reviewIndex+1} / ${reviewQueue.length}（高得点順）`;
+  el('reviewDetected').innerHTML=`
+    <div><span class="pill">score ${pct(d.match_score)}</span><span class="pill">読取 ${esc(d.legibility||'')}</span></div>
+    <div><strong>AI読取書名：</strong>${esc(d.detected_title||'（不明）')}</div>
+    <div><strong>著者：</strong>${esc(d.detected_author||'')}</div>
+    <div><strong>請求記号：</strong>${esc(d.detected_call_number||'（不明）')}</div>`;
+  try{ await drawCrop(await getScanImage(d.scan_id), d.bbox); }catch(e){ console.warn(e); }
+  renderCandidates(d);
+  setStatus('reviewStatus','');
+}
+
+function getCandidatesForDetection(d){
+  let cs=Array.isArray(d.candidates)?d.candidates:[];
+  if(!cs.length && d.candidate_book_id && allBooksById[d.candidate_book_id]){
+    const b=allBooksById[d.candidate_book_id]; cs=[{book_id:b.id,title:b.title,classification_number:b.classification_number,author_code:b.author_code,inventory_number:b.inventory_number,score:d.match_score??0}];
+  }
+  return cs.sort((a,b)=>(b.score??0)-(a.score??0));
+}
+
+function candidateHtml(c){
+  const b=allBooksById[c.book_id]||c; const low=(c.score??0)<.55;
+  return `<div class="candidate ${low?'low':''}" data-book-id="${esc(c.book_id)}">
+    <label style="margin:0;display:block;cursor:pointer;">
+      <input type="radio" name="bookCandidate" value="${esc(c.book_id)}" style="width:auto;margin-right:8px;" />
+      <strong>${esc(b.title||'（書名なし）')}</strong>
+    </label>
+    <div>${esc(b.classification_number||'')} ${esc(b.author_code||'')} ${esc(b.volume_label||'')}</div>
+    <div class="muted">資料番号 ${esc(b.inventory_number||'')} / 一致度 ${pct(c.score)}</div>
+    <div class="scorebar"><div style="width:${Math.max(0,Math.min(100,Math.round((c.score??0)*100)))}%"></div></div>
+  </div>`;
+}
+
+function renderCandidates(d){
+  const cs=getCandidatesForDetection(d);
+  if(!cs.length){ el('candidateList').innerHTML='<div class="warn">近い候補がありません。母表検索を使うか、「該当なし」を選んでください。</div>'; return; }
+  el('candidateList').innerHTML=cs.map(candidateHtml).join('');
+  document.querySelectorAll('input[name="bookCandidate"]').forEach(r=>r.addEventListener('change',()=>selectBook(Number(r.value))));
+  const top=cs[0];
+  if((top.score??0)>=.55 && allBooksById[top.book_id]?.status!=='confirmed'){
+    const r=document.querySelector(`input[name="bookCandidate"][value="${top.book_id}"]`); if(r){r.checked=true; selectBook(Number(top.book_id));}
+  }
+}
+
+function selectBook(id){
+  selectedBookId=id;
+  document.querySelectorAll('.candidate').forEach(x=>x.classList.toggle('selected',Number(x.dataset.bookId)===id));
+}
+
+el('bookSearchBtn').addEventListener('click',()=>{
+  const q=normalize(el('bookSearchInput').value); if(!q){el('bookSearchResults').innerHTML='';return;}
+  const terms=q.split(/\s+/).filter(Boolean);
+  const hits=allBooks.filter(b=>{
+    const hay=normalize([b.title,b.classification_number,b.author_code,b.inventory_number,b.volume_label].join(' '));
+    return terms.every(t=>hay.includes(t));
+  }).slice(0,20);
+  el('bookSearchResults').innerHTML=hits.length?hits.map(b=>candidateHtml({...b,book_id:b.id,score:0})).join(''):'<div class="muted">該当なし</div>';
+  el('bookSearchResults').querySelectorAll('input[name="bookCandidate"]').forEach(r=>r.addEventListener('change',()=>selectBook(Number(r.value))));
+});
+
+el('confirmReviewBtn').addEventListener('click',async()=>{
+  if(!selectedBookId) return setStatus('reviewStatus','母表候補を選択してください。候補がない場合は「該当なし」を押してください。','error');
+  const btn=el('confirmReviewBtn'); btn.disabled=true;
+  try{
+    setStatus('reviewStatus','総表に反映しています…');
+    await callFunction({action:'review',detection_id:reviewQueue[reviewIndex].id,outcome:'confirm',book_id:selectedBookId});
+    await loadAllBooks(); reviewIndex++; await renderCurrentReview();
+  }catch(e){ setStatus('reviewStatus',e.message,'error'); }
+  finally{btn.disabled=false;}
+});
+
+el('rejectReviewBtn').addEventListener('click',async()=>{
+  const btn=el('rejectReviewBtn'); btn.disabled=true;
+  try{
+    setStatus('reviewStatus','該当なしとして記録しています…');
+    await callFunction({action:'review',detection_id:reviewQueue[reviewIndex].id,outcome:'reject'});
+    await loadAllBooks(); reviewIndex++; await renderCurrentReview();
+  }catch(e){ setStatus('reviewStatus',e.message,'error'); }
+  finally{btn.disabled=false;}
+});
+
+async function downloadUpdatedXlsx(statusId='downloadStatus'){
+  setStatus(statusId,'総表を作成しています…');
+  try{
+    await loadAllBooks();
+    const resp=await fetch(TEMPLATE_PATH,{cache:'no-store'}); if(!resp.ok) throw new Error('master_template.xlsx を取得できません。GitHubに同じファイルを置いてください。');
+    const buf=await resp.arrayBuffer();
+    const wb=new ExcelJS.Workbook(); await wb.xlsx.load(buf);
+    const ws=wb.getWorksheet('資料リスト'); if(!ws) throw new Error('テンプレートに「資料リスト」シートがありません。');
+
+    const yellow={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFE699'}};
+    const pink={type:'pattern',pattern:'solid',fgColor:{argb:'FFF4CCCC'}};
+    for(const b of allBooks){
+      const row=Number(b.source_row); if(!row||row<2) continue;
+      const cell=ws.getCell(`C${row}`);
+      if(b.status==='confirmed'){
+        cell.value='○';
+        cell.alignment={...(cell.alignment||{}),horizontal:'center',vertical:'middle'};
+      }else if(b.status==='needs_review'){
+        cell.value=''; cell.fill=yellow;
+      }else{
+        cell.value=''; cell.fill=pink;
+      }
+    }
+    const out=await wb.xlsx.writeBuffer();
+    const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    const d=new Date(); const stamp=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}`;
+    a.download=`公用貸出実査リスト_更新_${stamp}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    setStatus(statusId,'XLSXを作成しました。○=確認済、黄色=要確認、ピンク=未確認です。','ok');
+  }catch(e){ setStatus(statusId,'XLSX作成エラー: '+e.message,'error'); throw e; }
+}
+
+el('downloadXlsxBtn').addEventListener('click',()=>downloadUpdatedXlsx('downloadStatus'));
+el('downloadNowBtn').addEventListener('click',()=>downloadUpdatedXlsx('homeDownloadStatus').catch(()=>{}));
+el('noDownloadBtn').addEventListener('click',showHome);
 
 restoreSession();
 </script>
