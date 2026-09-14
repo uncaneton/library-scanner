@@ -60,6 +60,7 @@
     .danger-note { background:#fff1f0; border-left:5px solid #b3261e; padding:10px 12px; border-radius:8px; margin:10px 0; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
+  <!-- Library Scanner v3.6: fixed false duplicate warning for newly auto-confirmed books -->
 </head>
 <body>
 <div class="wrap">
@@ -371,7 +372,7 @@ function renderScanSummary(summary,detections){
       <span class="pill">一致度 ${pct(d.match_score)}</span>
       <div><strong>AI読取：</strong>${esc(d.detected_title||'（書名不明）')}</div>
       <div><strong>請求記号：</strong>${esc(d.detected_call_number||'不明')}</div>
-      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${cand.status==='confirmed'?'<div class="warn">⚠ すでに確認済みの候補です。重複撮影の可能性があります。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
+      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${d.decision!=='auto_confirmed' && cand.status==='confirmed'?'<div class="warn">⚠ 別の判定ですでに確認済みの候補です。重複撮影の可能性があります。</div>':d.decision==='auto_confirmed'?'<div class="ok">✓ 今回のスキャンで自動確認されました。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
     </div>`;
   }).join('');
   el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
