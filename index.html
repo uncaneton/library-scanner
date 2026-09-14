@@ -69,8 +69,12 @@
       <label for="shelfLabel">棚番号・場所（任意）</label>
       <input id="shelfLabel" type="text" placeholder="例：A-03 上段" />
 
-      <label for="photo">写真</label>
-      <input id="photo" type="file" accept="image/*" capture="environment" />
+      <label>写真</label>
+      <div class="muted">カメラで新しく撮るか、スマホの写真ライブラリから選んでください。</div>
+      <input id="cameraPhoto" type="file" accept="image/*" capture="environment" />
+      <div class="muted" style="margin:6px 0 10px;">↑ カメラで撮影</div>
+      <input id="libraryPhoto" type="file" accept="image/*" />
+      <div class="muted" style="margin-top:6px;">↑ 写真ライブラリ／相冊から選択</div>
       <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
 
       <button id="scanBtn">アップロードしてAIで確認</button>
@@ -98,6 +102,7 @@ const loginCard = el('loginCard');
 const app = el('app');
 let currentUser = null;
 let resizedBlob = null;
+let selectedFile = null;
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -171,23 +176,38 @@ async function refreshProgress() {
   }
 }
 
-el('photo').addEventListener('change', async (ev) => {
-  const file = ev.target.files?.[0];
+async function prepareSelectedPhoto(file, sourceInputId) {
+  selectedFile = file ?? null;
   resizedBlob = null;
-  if (!file) {
+
+  // 片方を選んだら、もう片方の選択状態をクリアする
+  if (sourceInputId === 'cameraPhoto') el('libraryPhoto').value = '';
+  if (sourceInputId === 'libraryPhoto') el('cameraPhoto').value = '';
+
+  if (!selectedFile) {
     el('preview').classList.add('hidden');
     return;
   }
+
   setStatus('scanStatus', '画像を準備しています…');
   try {
-    resizedBlob = await resizeImage(file, 2000, 0.85);
+    resizedBlob = await resizeImage(selectedFile, 2000, 0.85);
     el('preview').src = URL.createObjectURL(resizedBlob);
     el('preview').classList.remove('hidden');
     setStatus('scanStatus', `準備完了（約 ${(resizedBlob.size/1024/1024).toFixed(2)} MB）`, 'ok');
   } catch (e) {
     console.error(e);
+    selectedFile = null;
     setStatus('scanStatus', '画像の準備に失敗しました: ' + e.message, 'error');
   }
+}
+
+el('cameraPhoto').addEventListener('change', async (ev) => {
+  await prepareSelectedPhoto(ev.target.files?.[0], 'cameraPhoto');
+});
+
+el('libraryPhoto').addEventListener('change', async (ev) => {
+  await prepareSelectedPhoto(ev.target.files?.[0], 'libraryPhoto');
 });
 
 function resizeImage(file, maxSide=2000, quality=0.85) {
@@ -217,8 +237,8 @@ function resizeImage(file, maxSide=2000, quality=0.85) {
 
 el('scanBtn').addEventListener('click', async () => {
   if (!currentUser) return;
-  const file = el('photo').files?.[0];
-  if (!file) return setStatus('scanStatus', '写真を選択してください。', 'error');
+  const file = selectedFile;
+  if (!file) return setStatus('scanStatus', 'カメラで撮影するか、写真ライブラリから写真を選んでください。', 'error');
   if (!resizedBlob) return setStatus('scanStatus', '画像の準備が終わるまで少しお待ちください。', 'error');
 
   const btn = el('scanBtn');
