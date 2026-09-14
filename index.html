@@ -60,12 +60,12 @@
     .danger-note { background:#fff1f0; border-left:5px solid #b3261e; padding:10px 12px; border-radius:8px; margin:10px 0; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
-  <!-- Library Scanner v3.8: two-row photos are split into upper/lower row and analyzed separately -->
+  <!-- Library Scanner v3.9: title-priority matching, 90% auto-confirm, editable auto-confirm results -->
 </head>
 <body>
 <div class="wrap">
   <h1>大阪大学比較対照言語学研究室・図書点検</h1>
-  <div class="muted">棚1段・15〜20冊程度を推奨します。2段が写る写真は「2段」を選ぶと上段・下段に分けて解析します。</div>
+  <div class="muted">棚1段・15〜20冊程度を推奨します。2段が写る写真は「2段」を選ぶと上段・下段に分けて解析します。書名を最重要視し、総合一致度90%以上・書名一致度90%以上は原則自動確認します。</div>
 
   <section id="loginCard" class="card">
     <h2>ログイン</h2>
@@ -88,6 +88,7 @@
         </div>
         <div class="muted" id="progressText"></div>
         <button id="resumeReviewBtn" class="warnbtn">保留中の人手確認を続ける</button>
+        <button id="autoReviewBtn" class="secondary">自動確認済みを確認・修正</button>
         <button id="downloadNowBtn" class="secondary">最新状態の総表をXLSXでダウンロード</button>
         <div class="muted">ダウンロードするたびに、データベースの最新状態を取得して作成します。</div>
         <div id="homeDownloadStatus" class="statusline muted"></div>
@@ -130,7 +131,7 @@
       <div id="summaryCard" class="card hidden">
         <h2>解析結果</h2>
         <div id="summary"></div>
-        <div class="muted" style="margin-top:10px;">要確認項目は一致度の高い順に確認します。低得点の候補は自動確定しません。</div>
+        <div class="muted" style="margin-top:10px;">総合一致度90%以上かつ書名一致度90%以上は原則自動確認します（同点の複本候補・重複検出は除外）。自動確認後も修正できます。</div>
         <div id="detections"></div>
         <button id="startCurrentReviewBtn" class="warnbtn">人手確認へ進む</button>
         <button id="skipCurrentReviewBtn" class="secondary">あとで確認する</button>
@@ -201,6 +202,7 @@ let currentScanImagePath = null;
 let currentBatchScanIds = [];
 let reviewQueue = [];
 let reviewIndex = 0;
+let reviewMode = 'pending'; // pending | auto
 let selectedBookId = null;
 let allBooks = [];
 let allBooksById = {};
@@ -422,33 +424,44 @@ function renderScanSummary(summary,detections){
   const sorted=[...detections].sort((a,b)=>(b.match_score??-1)-(a.match_score??-1));
   el('detections').innerHTML=sorted.map((d,i)=>{
     const cand=d.candidate_book_id?allBooksById[d.candidate_book_id]:null;
+    const top=Array.isArray(d.candidates)&&d.candidates.length?d.candidates[0]:null;
+    const titleSim=top?.title_similarity;
     return `<div class="result ${d.decision==='auto_confirmed'?'auto':''}">
       <span class="pill">${d.decision==='auto_confirmed'?'自動確認':'要確認'}</span>
-      <span class="pill">一致度 ${pct(d.match_score)}</span>
+      <span class="pill">総合一致度 ${pct(d.match_score)}</span>
+      ${titleSim!=null?`<span class="pill">書名一致度 ${pct(titleSim)}</span>`:''}
       <div><strong>AI読取：</strong>${esc(d.detected_title||'（書名不明）')}</div>
       <div><strong>請求記号：</strong>${esc(d.detected_call_number||'不明')}</div>
       ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${d.decision!=='auto_confirmed' && cand.status==='confirmed'?`<div class="warn">${esc(confirmedWarningText(cand,d.scan_id||currentScanId))}</div>`:d.decision==='auto_confirmed'?'<div class="ok">✓ 今回のスキャンで自動確認されました。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
+      ${d.decision==='auto_confirmed'?`<button type="button" class="secondary smallbtn auto-edit-btn" data-detection-id="${esc(d.id)}">この自動確認を確認・修正</button>`:''}
     </div>`;
   }).join('');
+  el('detections').querySelectorAll('.auto-edit-btn').forEach(btn=>btn.addEventListener('click',()=>startReview({detectionId:Number(btn.dataset.detectionId), decision:'auto_confirmed'})));
   el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
 }
 
-el('startCurrentReviewBtn').addEventListener('click',()=>startReview({scanIds:currentBatchScanIds.length?currentBatchScanIds:[currentScanId].filter(Boolean)}));
+el('startCurrentReviewBtn').addEventListener('click',()=>startReview({scanIds:currentBatchScanIds.length?currentBatchScanIds:[currentScanId].filter(Boolean),decision:'needs_review'}));
 el('skipCurrentReviewBtn').addEventListener('click',()=>{ el('summaryCard').classList.add('hidden'); });
-el('resumeReviewBtn').addEventListener('click',()=>startReview({scanId:null}));
+el('resumeReviewBtn').addEventListener('click',()=>startReview({scanId:null,decision:'needs_review'}));
+el('autoReviewBtn').addEventListener('click',()=>startReview({scanId:null,decision:'auto_confirmed'}));
 el('backHomeBtn').addEventListener('click',showHome);
 
-async function startReview({scanId=null,scanIds=null}={}){
+async function startReview({scanId=null,scanIds=null,detectionId=null,decision='needs_review'}={}){
   try{
-    setStatus('scanStatus','要確認データを読み込んでいます…');
-    let q=sb.from('detections').select('id,scan_id,detected_title,detected_author,detected_call_number,candidate_book_id,match_score,decision,bbox,legibility,raw_detected,candidates').eq('decision','needs_review');
-    if(Array.isArray(scanIds) && scanIds.length) q=q.in('scan_id',scanIds); else if(scanId) q=q.eq('scan_id',scanId);
-    const {data,error}=await q.order('match_score',{ascending:false,nullsFirst:false}).limit(500);
+    reviewMode=decision==='auto_confirmed'?'auto':'pending';
+    setStatus('scanStatus',reviewMode==='auto'?'自動確認済みデータを読み込んでいます…':'要確認データを読み込んでいます…');
+    let q=sb.from('detections').select('id,scan_id,detected_title,detected_author,detected_call_number,candidate_book_id,match_score,decision,bbox,legibility,raw_detected,candidates,created_at').eq('decision',decision);
+    if(detectionId) q=q.eq('id',detectionId);
+    else if(Array.isArray(scanIds) && scanIds.length) q=q.in('scan_id',scanIds);
+    else if(scanId) q=q.eq('scan_id',scanId);
+    if(reviewMode==='auto' && !detectionId) q=q.order('created_at',{ascending:false});
+    else q=q.order('match_score',{ascending:false,nullsFirst:false});
+    const {data,error}=await q.limit(500);
     if(error) throw error;
     reviewQueue=data??[]; reviewIndex=0;
-    if(!reviewQueue.length){ return showComplete('要確認項目はありません。'); }
+    if(!reviewQueue.length){ return showComplete(reviewMode==='auto'?'修正できる自動確認項目はありません。':'要確認項目はありません。'); }
     showReview(); await renderCurrentReview();
-  }catch(e){ setStatus('scanStatus','要確認の読込エラー: '+e.message,'error'); }
+  }catch(e){ setStatus('scanStatus',(reviewMode==='auto'?'自動確認の読込エラー: ':'要確認の読込エラー: ')+e.message,'error'); }
 }
 
 function showHome(){
@@ -497,9 +510,13 @@ function drawCrop(blob,bbox){
 async function renderCurrentReview(){
   if(reviewIndex>=reviewQueue.length) return showComplete();
   const d=reviewQueue[reviewIndex]; selectedBookId=null; el('duplicatePanel').classList.add('hidden'); el('bookSearchResults').innerHTML=''; el('bookSearchInput').value='';
-  el('reviewCounter').textContent=`${reviewIndex+1} / ${reviewQueue.length}（一致度の高い順）`;
+  el('reviewCounter').textContent=reviewMode==='auto'
+    ? `${reviewIndex+1} / ${reviewQueue.length}（自動確認の確認・修正）`
+    : `${reviewIndex+1} / ${reviewQueue.length}（一致度の高い順）`;
+  el('confirmReviewBtn').textContent=reviewMode==='auto'?'選択した本に修正・確定':'選択した本で確認';
+  el('rejectReviewBtn').textContent=reviewMode==='auto'?'自動確認を取り消して該当なし':'該当なし／未発見のまま';
   el('reviewDetected').innerHTML=`
-    <div><span class="pill">一致度 ${pct(d.match_score)}</span><span class="pill">読取状態 ${esc(d.legibility||'')}</span></div>
+    <div><span class="pill">総合一致度 ${pct(d.match_score)}</span><span class="pill">読取状態 ${esc(d.legibility||'')}</span>${reviewMode==='auto'?'<span class="pill">自動確認済み・修正可能</span>':''}</div>
     <div><strong>AI読取書名：</strong>${esc(d.detected_title||'（不明）')}</div>
     <div><strong>著者：</strong>${esc(d.detected_author||'')}</div>
     <div><strong>請求記号：</strong>${esc(d.detected_call_number||'（不明）')}</div>`;
@@ -526,7 +543,7 @@ function candidateHtml(c){
       <strong>${esc(b.title||'（書名なし）')}</strong>
     </label>
     <div>${esc(b.classification_number||'')} ${esc(b.author_code||'')} ${esc(b.volume_label||'')}</div>
-    <div class="muted">資料番号 ${esc(b.inventory_number||'')} / 一致度 ${pct(c.score)}${copyNote}</div>
+    <div class="muted">資料番号 ${esc(b.inventory_number||'')} / 総合一致度 ${pct(c.score)}${c.title_similarity!=null?` / 書名一致度 ${pct(c.title_similarity)}`:''}${copyNote}</div>
     <div class="${statusClass(b.status)}">母表状態：${statusLabel(b.status)}</div>
     <div class="scorebar"><div style="width:${Math.max(0,Math.min(100,Math.round((c.score??0)*100)))}%"></div></div>
   </div>`;
@@ -560,7 +577,11 @@ function renderDuplicateWarning(id){
   panel.classList.remove('hidden');
   const currentDetection=reviewQueue[reviewIndex]||null;
   const currentScanForWarning=currentDetection?.scan_id||currentScanId;
-  if(b.status==='confirmed'){
+  const ownAutoCandidate=currentDetection?.decision==='auto_confirmed' && Number(currentDetection?.candidate_book_id)===Number(id);
+  if(ownAutoCandidate){
+    if(!siblings.length){ panel.classList.add('hidden'); return; }
+    msg.textContent='現在AIが自動確認した資料です。母表に同一書誌が複数あるため、別の複本だった場合は下の未確認資料を選び直せます。';
+  }else if(b.status==='confirmed'){
     if(wasConfirmedAfterScanStarted(b,currentScanForWarning)){
       msg.textContent='このスキャン開始後にこの資料がすでに確認されています。同じ写真内で同じ本が二重に検出された可能性があります。同じ実物なら「同じ本の重複撮影として登録しない」を選んでください。別の複本であれば、下の未確認資料を選んでください。';
     }else{
@@ -599,9 +620,10 @@ el('bookSearchBtn').addEventListener('click',()=>{
 
 el('confirmReviewBtn').addEventListener('click',async()=>{
   if(!selectedBookId) return setStatus('reviewStatus','母表候補を選択してください。候補がない場合は「該当なし」を押してください。','error');
-  if(allBooksById[selectedBookId]?.status==='confirmed'){
+  const d=reviewQueue[reviewIndex];
+  const ownAutoCandidate=d?.decision==='auto_confirmed' && Number(d?.candidate_book_id)===Number(selectedBookId);
+  if(allBooksById[selectedBookId]?.status==='confirmed' && !ownAutoCandidate){
     renderDuplicateWarning(selectedBookId);
-    const d=reviewQueue[reviewIndex];
     const b=allBooksById[selectedBookId];
     const msg=wasConfirmedAfterScanStarted(b,d?.scan_id||currentScanId)
       ? 'このスキャン開始後にこの母表項目が確認されています。同じ本の二重検出なら重複撮影として除外し、別の複本なら未確認の資料を選択してください。'
@@ -791,7 +813,7 @@ el('resetAllBtn').addEventListener('click',async()=>{
   try{
     setStatus('resetStatus','全データをリセットしています。画面を閉じないでください…');
     const result=await callFunction({action:'reset_all',password,confirm_text:confirmText});
-    selectedFile=null; resizedBlob=null; preparedParts=[]; currentScanId=null; currentScanImagePath=null; currentBatchScanIds=[]; reviewQueue=[]; reviewIndex=0; imageCache.clear(); scanCreatedAtById.clear();
+    selectedFile=null; resizedBlob=null; preparedParts=[]; currentScanId=null; currentScanImagePath=null; currentBatchScanIds=[]; reviewQueue=[]; reviewIndex=0; reviewMode='pending'; imageCache.clear(); scanCreatedAtById.clear();
     el('preview').classList.add('hidden'); el('summaryCard').classList.add('hidden'); el('cameraPhoto').value=''; el('libraryPhoto').value='';
     el('resetPassword').value=''; el('resetConfirmText').value='';
     await loadAllBooks(); await refreshProgress();
