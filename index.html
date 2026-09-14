@@ -56,6 +56,8 @@
     .status-confirmed { color:#137333; font-weight:700; }
     .status-review { color:#b06000; font-weight:700; }
     .status-unseen { color:#5f6368; font-weight:700; }
+    .admin-card { border:2px solid #b3261e; background:#fffafa; }
+    .danger-note { background:#fff1f0; border-left:5px solid #b3261e; padding:10px 12px; border-radius:8px; margin:10px 0; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -90,6 +92,17 @@
         <div id="homeDownloadStatus" class="statusline muted"></div>
         <button id="refreshBtn" class="secondary">進捗を更新</button>
         <button id="logoutBtn" class="secondary">ログアウト</button>
+      </div>
+
+      <div id="adminResetCard" class="card admin-card hidden">
+        <h2>管理者用：点検データを全リセット</h2>
+        <div class="danger-note"><strong>注意：</strong>アップロード済み写真、スキャン履歴、AI認識・人手確認履歴を削除し、4,141冊の状態をすべて「未確認」に戻します。母表4,141冊そのものは削除しません。</div>
+        <label for="resetPassword">リセット用パスワード</label>
+        <input id="resetPassword" type="password" autocomplete="off" />
+        <label for="resetConfirmText">確認のため「全削除」と入力</label>
+        <input id="resetConfirmText" type="text" autocomplete="off" placeholder="全削除" />
+        <button id="resetAllBtn" class="danger">写真・点検履歴・進捗をすべてリセット</button>
+        <div id="resetStatus" class="statusline muted"></div>
       </div>
 
       <div class="card">
@@ -172,6 +185,7 @@ const TOTAL_BOOKS = 4141;
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 const el = id => document.getElementById(id);
 let currentUser = null;
+let currentRole = 'worker';
 let selectedFile = null;
 let resizedBlob = null;
 let currentScanId = null;
@@ -212,10 +226,18 @@ async function restoreSession(){
   if(session?.user){ currentUser=session.user; await enterApp(); }
 }
 
+async function loadCurrentRole(){
+  const {data,error}=await sb.from('profiles').select('role').eq('id',currentUser.id).maybeSingle();
+  if(error){ console.warn(error); currentRole='worker'; return; }
+  currentRole=data?.role||'worker';
+}
+
 async function enterApp(){
   el('loginCard').classList.add('hidden');
   el('app').classList.remove('hidden');
   el('userEmail').textContent=currentUser.email ?? 'ログイン中';
+  await loadCurrentRole();
+  el('adminResetCard').classList.toggle('hidden', currentRole!=='admin');
   await loadAllBooks();
   await refreshProgress();
 }
@@ -263,7 +285,7 @@ async function refreshProgress(){
   }catch(e){ console.error(e); }
 }
 
-function resizeImage(file,maxSide=2000,quality=.86){
+function resizeImage(file,maxSide=2400,quality=.90){
   return new Promise((resolve,reject)=>{
     const img=new Image(), url=URL.createObjectURL(file);
     img.onload=()=>{
@@ -318,7 +340,7 @@ el('scanBtn').addEventListener('click',async()=>{
     if(uploadError) throw uploadError;
 
     setStatus('scanStatus','2/4 スキャン記録を作成しています…');
-    const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,shelf_label:el('shelfLabel').value.trim(),image_path:path}).select().single();
+    const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,uploader_email:currentUser.email||null,shelf_label:el('shelfLabel').value.trim(),image_path:path}).select().single();
     if(scanError) throw scanError;
     currentScanId=scan.id; currentScanImagePath=path;
 
@@ -544,6 +566,77 @@ el('rejectReviewBtn').addEventListener('click',async()=>{
   finally{btn.disabled=false;}
 });
 
+async function loadPaged(table,columns,orderColumn='created_at'){
+  const rows=[]; const step=1000;
+  for(let from=0;;from+=step){
+    let q=sb.from(table).select(columns).range(from,from+step-1);
+    if(orderColumn) q=q.order(orderColumn,{ascending:true});
+    const {data,error}=await q;
+    if(error) throw error;
+    rows.push(...(data??[]));
+    if(!data || data.length<step) break;
+  }
+  return rows;
+}
+
+function jpDateTime(v){
+  if(!v) return '';
+  try{ return new Date(v).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'}); }
+  catch(_){ return String(v); }
+}
+
+function decisionLabel(v){
+  return ({
+    auto_confirmed:'AI自動確認',
+    needs_review:'要確認',
+    confirmed_by_human:'人手確認',
+    duplicate_scan:'重複撮影として除外',
+    rejected:'該当なし',
+    pending:'保留'
+  })[v]||String(v||'');
+}
+
+async function addAuditSheet(wb){
+  const [scans,detections]=await Promise.all([
+    loadPaged('scans','id,shelf_label,image_path,created_at,uploaded_by,uploader_email,analyzed_at'),
+    loadPaged('detections','id,scan_id,candidate_book_id,detected_title,detected_author,detected_call_number,match_score,decision,created_at,reviewed_at,reviewed_by_email')
+  ]);
+  const scanById=Object.fromEntries(scans.map(x=>[x.id,x]));
+  const events=[];
+  for(const sc of scans){
+    events.push({
+      at:sc.created_at, account:sc.uploader_email||sc.uploaded_by||'', action:'写真アップロード', shelf:sc.shelf_label||'',
+      inventory:'', masterTitle:'', aiTitle:'', aiCall:'', score:'', decision:'', scanId:sc.id, detectionId:'', imagePath:sc.image_path||''
+    });
+  }
+  for(const d of detections){
+    const sc=scanById[d.scan_id]||{};
+    const b=d.candidate_book_id?allBooksById[d.candidate_book_id]:null;
+    const finalish=['auto_confirmed','confirmed_by_human','duplicate_scan','rejected'].includes(d.decision);
+    events.push({
+      at:(finalish?d.reviewed_at:null)||d.created_at,
+      account:d.reviewed_by_email||sc.uploader_email||sc.uploaded_by||'',
+      action:decisionLabel(d.decision), shelf:sc.shelf_label||'', inventory:b?.inventory_number||'', masterTitle:b?.title||'',
+      aiTitle:d.detected_title||'', aiCall:d.detected_call_number||'', score:d.match_score==null?'':Math.round(Number(d.match_score)*100)+'%',
+      decision:decisionLabel(d.decision), scanId:d.scan_id||'', detectionId:d.id||'', imagePath:sc.image_path||''
+    });
+  }
+  events.sort((a,b)=>new Date(a.at||0)-new Date(b.at||0));
+
+  const old=wb.getWorksheet('点検履歴'); if(old) wb.removeWorksheet(old.id);
+  const ws=wb.addWorksheet('点検履歴');
+  const headers=['日時（JST）','アカウント','操作','棚番号・場所','資料番号','母表書名','AI読取書名','AI読取請求記号','一致度','判定','Scan ID','Detection ID','画像パス'];
+  ws.addRow(headers);
+  for(const e of events) ws.addRow([jpDateTime(e.at),e.account,e.action,e.shelf,e.inventory,e.masterTitle,e.aiTitle,e.aiCall,e.score,e.decision,e.scanId,e.detectionId,e.imagePath]);
+  const header=ws.getRow(1); header.font={bold:true,color:{argb:'FFFFFFFF'}}; header.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF44546A'}};
+  header.alignment={vertical:'middle',horizontal:'center'};
+  ws.views=[{state:'frozen',ySplit:1}];
+  const widths=[20,30,20,18,16,42,42,20,10,20,38,14,48];
+  widths.forEach((w,i)=>ws.getColumn(i+1).width=w);
+  ws.eachRow((row,rowNo)=>{ if(rowNo>1) row.alignment={vertical:'top',wrapText:true}; });
+  ws.autoFilter={from:{row:1,column:1},to:{row:1,column:headers.length}};
+}
+
 async function downloadUpdatedXlsx(statusId='downloadStatus'){
   setStatus(statusId,'総表を作成しています…');
   try{
@@ -568,14 +661,37 @@ async function downloadUpdatedXlsx(statusId='downloadStatus'){
         cell.value=''; cell.fill=pink;
       }
     }
+    await addAuditSheet(wb);
     const out=await wb.xlsx.writeBuffer();
     const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
     const d=new Date(); const stamp=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}`;
     a.download=`公用貸出実査リスト_更新_${stamp}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-    setStatus(statusId,'最新状態のXLSXを作成しました。緑（○）=確認済、黄色=要確認、ピンク=未確認です。','ok');
+    setStatus(statusId,'最新状態のXLSXを作成しました。緑（○）=確認済、黄色=要確認、ピンク=未確認です。「点検履歴」シートにアカウント・日時・判定履歴も記録しています。','ok');
   }catch(e){ setStatus(statusId,'XLSX作成エラー: '+e.message,'error'); throw e; }
 }
+
+el('resetAllBtn').addEventListener('click',async()=>{
+  if(currentRole!=='admin') return setStatus('resetStatus','管理者のみ実行できます。','error');
+  const password=el('resetPassword').value;
+  const confirmText=el('resetConfirmText').value.trim();
+  if(!password) return setStatus('resetStatus','リセット用パスワードを入力してください。','error');
+  if(confirmText!=='全削除') return setStatus('resetStatus','確認欄に「全削除」と入力してください。','error');
+  if(!confirm('アップロード済み写真・点検履歴・進捗をすべて削除し、4,141冊を未確認に戻します。実行しますか？')) return;
+  const btn=el('resetAllBtn'); btn.disabled=true;
+  try{
+    setStatus('resetStatus','全データをリセットしています。画面を閉じないでください…');
+    const result=await callFunction({action:'reset_all',password,confirm_text:confirmText});
+    selectedFile=null; resizedBlob=null; currentScanId=null; currentScanImagePath=null; reviewQueue=[]; reviewIndex=0; imageCache.clear();
+    el('preview').classList.add('hidden'); el('summaryCard').classList.add('hidden'); el('cameraPhoto').value=''; el('libraryPhoto').value='';
+    el('resetPassword').value=''; el('resetConfirmText').value='';
+    await loadAllBooks(); await refreshProgress();
+    const warning=(result.storage_warnings||[]).length?`（写真削除警告: ${(result.storage_warnings||[]).join(' / ')}）`:'';
+    setStatus('resetStatus',`${result.message||'リセット完了'} 削除対象写真: ${result.deleted_photos??0}件 ${warning}`,(result.storage_warnings||[]).length?'warn':'ok');
+    alert('点検データのリセットが完了しました。');
+  }catch(e){ setStatus('resetStatus','リセットエラー: '+e.message,'error'); }
+  finally{btn.disabled=false;}
+});
 
 el('downloadXlsxBtn').addEventListener('click',()=>downloadUpdatedXlsx('downloadStatus'));
 el('downloadNowBtn').addEventListener('click',()=>downloadUpdatedXlsx('homeDownloadStatus').catch(()=>{}));
