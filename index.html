@@ -77,6 +77,7 @@
       <div class="muted" style="margin-top:6px;">↑ 写真ライブラリ／相冊から選択</div>
       <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
 
+      <button id="testFunctionBtn" class="secondary">Edge Function 接続テスト</button>
       <button id="scanBtn">アップロードしてAIで確認</button>
       <div id="scanStatus" class="statusline muted"></div>
     </div>
@@ -235,6 +236,76 @@ function resizeImage(file, maxSide=2000, quality=0.85) {
   });
 }
 
+
+async function callLibraryScan(payload) {
+  const { data: { session }, error: sessionError } = await sb.auth.getSession();
+  if (sessionError) throw new Error('ログインセッション取得失敗: ' + sessionError.message);
+  if (!session?.access_token) throw new Error('ログインセッションがありません。いったんログアウトして再ログインしてください。');
+
+  const url = `${SUPABASE_URL}/functions/v1/${FUNCTION_NAME}`;
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_PUBLISHABLE_KEY,
+        'Authorization': `Bearer ${session.access_token}`
+      },
+      body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    throw new Error(`Edge Functionへ通信できませんでした。URL: ${url} / ${e?.message ?? e}`);
+  }
+
+  const raw = await resp.text();
+  let data = null;
+  try { data = raw ? JSON.parse(raw) : {}; } catch (_) { data = { raw }; }
+
+  if (!resp.ok) {
+    const detail = data?.error || data?.message || data?.raw || raw || '(本文なし)';
+    throw new Error(`Edge Function HTTP ${resp.status}: ${detail}`);
+  }
+  return data;
+}
+
+el('testFunctionBtn').addEventListener('click', async () => {
+  const btn = el('testFunctionBtn');
+  btn.disabled = true;
+  setStatus('scanStatus', 'Edge Functionとの接続を確認しています…');
+  try {
+    // 空の imagePath を送る。認証と通信が通れば、Function側から 400 imagePath is required が返る。
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session?.access_token) throw new Error('ログインセッションがありません。');
+    const url = `${SUPABASE_URL}/functions/v1/${FUNCTION_NAME}`;
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_PUBLISHABLE_KEY,
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({})
+      });
+    } catch (e) {
+      throw new Error(`通信自体に失敗しました: ${e?.message ?? e}`);
+    }
+    const raw = await resp.text();
+    // HTTP 400 + imagePath is required は、接続・認証・CORSすべて成功のサイン。
+    if (resp.status === 400 && raw.includes('imagePath is required')) {
+      setStatus('scanStatus', '接続テスト成功：GitHub Pages → Supabase Edge Function の通信と認証は正常です。', 'ok');
+    } else {
+      setStatus('scanStatus', `接続テスト結果：HTTP ${resp.status} / ${raw || '(本文なし)'}`, resp.ok ? 'ok' : 'error');
+    }
+  } catch (e) {
+    setStatus('scanStatus', '接続テスト失敗：' + (e.message ?? String(e)), 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 el('scanBtn').addEventListener('click', async () => {
   if (!currentUser) return;
   const file = selectedFile;
@@ -257,13 +328,10 @@ el('scanBtn').addEventListener('click', async () => {
     if (uploadError) throw uploadError;
 
     setStatus('scanStatus', '2/3 AIが本を認識しています…（少し時間がかかります）');
-    const { data, error } = await sb.functions.invoke(FUNCTION_NAME, {
-      body: {
-        imagePath: path,
-        shelfLabel: el('shelfLabel').value.trim()
-      }
+    const data = await callLibraryScan({
+      imagePath: path,
+      shelfLabel: el('shelfLabel').value.trim()
     });
-    if (error) throw error;
     if (data?.error) throw new Error(data.error);
 
     setStatus('scanStatus', '3/3 候補を読み込んでいます…');
