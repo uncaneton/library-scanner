@@ -60,7 +60,7 @@
     .danger-note { background:#fff1f0; border-left:5px solid #b3261e; padding:10px 12px; border-radius:8px; margin:10px 0; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
-  <!-- Library Scanner v3.6: fixed false duplicate warning for newly auto-confirmed books -->
+  <!-- Library Scanner v3.7: distinguish pre-existing confirmations from confirmations made after the current scan started -->
 </head>
 <body>
 <div class="wrap">
@@ -197,6 +197,7 @@ let selectedBookId = null;
 let allBooks = [];
 let allBooksById = {};
 let imageCache = new Map();
+let scanCreatedAtById = new Map();
 
 function esc(s){ return String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function setStatus(id,msg,cls='muted'){ const n=el(id); n.className='statusline '+cls; n.textContent=msg; }
@@ -344,6 +345,7 @@ el('scanBtn').addEventListener('click',async()=>{
     const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,uploader_email:currentUser.email||null,shelf_label:el('shelfLabel').value.trim(),image_path:path}).select().single();
     if(scanError) throw scanError;
     currentScanId=scan.id; currentScanImagePath=path;
+    if(scan.created_at) scanCreatedAtById.set(scan.id, scan.created_at);
 
     setStatus('scanStatus','3/4 AIが本を認識して母表と照合しています…');
     const result=await callFunction({action:'analyze',scan_id:scan.id,storage_path:path});
@@ -356,6 +358,22 @@ el('scanBtn').addEventListener('click',async()=>{
   }catch(e){ console.error(e); setStatus('scanStatus','エラー: '+(e.message??String(e)),'error'); }
   finally{ btn.disabled=false; }
 });
+
+function wasConfirmedAfterScanStarted(book, scanId){
+  if(!book || book.status!=='confirmed' || !book.confirmed_at || !scanId) return false;
+  const started=scanCreatedAtById.get(scanId);
+  if(!started) return false;
+  const c=new Date(book.confirmed_at).getTime();
+  const s=new Date(started).getTime();
+  return Number.isFinite(c) && Number.isFinite(s) && c >= (s-2000);
+}
+
+function confirmedWarningText(book, scanId){
+  if(wasConfirmedAfterScanStarted(book,scanId)){
+    return '⚠ このスキャン開始後に確認された候補です。同じ写真内で同じ本が二重に検出された可能性があります。';
+  }
+  return '⚠ このスキャンより前から確認済みの候補です。重複撮影の可能性があります。';
+}
 
 function renderScanSummary(summary,detections){
   el('summaryCard').classList.remove('hidden');
@@ -372,7 +390,7 @@ function renderScanSummary(summary,detections){
       <span class="pill">一致度 ${pct(d.match_score)}</span>
       <div><strong>AI読取：</strong>${esc(d.detected_title||'（書名不明）')}</div>
       <div><strong>請求記号：</strong>${esc(d.detected_call_number||'不明')}</div>
-      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${d.decision!=='auto_confirmed' && cand.status==='confirmed'?'<div class="warn">⚠ 別の判定ですでに確認済みの候補です。重複撮影の可能性があります。</div>':d.decision==='auto_confirmed'?'<div class="ok">✓ 今回のスキャンで自動確認されました。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
+      ${cand?`<div class="muted">候補：${esc(cand.title)} / ${esc(cand.classification_number)} ${esc(cand.author_code)} / 母表状態：${statusLabel(cand.status)}${equivalentCopies(cand).length?` / 同一書誌 ${equivalentCopies(cand).length+1}件`:''}</div>${d.decision!=='auto_confirmed' && cand.status==='confirmed'?`<div class="warn">${esc(confirmedWarningText(cand,d.scan_id||currentScanId))}</div>`:d.decision==='auto_confirmed'?'<div class="ok">✓ 今回のスキャンで自動確認されました。</div>':''}`:'<div class="warn">十分に近い母表候補なし</div>'}
     </div>`;
   }).join('');
   el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
@@ -411,8 +429,9 @@ function showComplete(msg='この確認キューは完了しました。'){
 
 async function getScanImage(scanId){
   if(imageCache.has(scanId)) return imageCache.get(scanId);
-  const {data:scan,error}=await sb.from('scans').select('image_path').eq('id',scanId).single();
+  const {data:scan,error}=await sb.from('scans').select('image_path,created_at').eq('id',scanId).single();
   if(error) throw error;
+  if(scan.created_at) scanCreatedAtById.set(scanId,scan.created_at);
   const {data:blob,error:dlError}=await sb.storage.from(BUCKET).download(scan.image_path);
   if(dlError) throw dlError;
   imageCache.set(scanId,blob); return blob;
@@ -502,10 +521,19 @@ function renderDuplicateWarning(id){
   const needsWarning=b.status==='confirmed' || confirmedGroup.length>0 || siblings.length>0;
   if(!needsWarning){ panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
+  const currentDetection=reviewQueue[reviewIndex]||null;
+  const currentScanForWarning=currentDetection?.scan_id||currentScanId;
   if(b.status==='confirmed'){
-    msg.textContent='選択した母表項目はすでに確認済みです。同じ実物を別の写真でもう一度撮影した可能性があります。別の複本であれば、下の未確認資料を選んでください。';
+    if(wasConfirmedAfterScanStarted(b,currentScanForWarning)){
+      msg.textContent='このスキャン開始後にこの資料がすでに確認されています。同じ写真内で同じ本が二重に検出された可能性があります。同じ実物なら「同じ本の重複撮影として登録しない」を選んでください。別の複本であれば、下の未確認資料を選んでください。';
+    }else{
+      msg.textContent='このスキャンより前から確認済みの資料です。同じ実物を別の写真でもう一度撮影した可能性があります。別の複本であれば、下の未確認資料を選んでください。';
+    }
   }else if(confirmedGroup.length){
-    msg.textContent='同一書誌の別資料がすでに確認済みです。今回の写真が同じ実物の重複撮影か、未確認の別の複本かを確認してください。';
+    const recentConfirmed=confirmedGroup.some(x=>wasConfirmedAfterScanStarted(x,currentScanForWarning));
+    msg.textContent=recentConfirmed
+      ? 'このスキャン開始後に同一書誌の別資料が確認されています。同じ写真内の二重検出か、未確認の別の複本かを確認してください。'
+      : 'このスキャンより前から同一書誌の別資料が確認済みです。今回の写真が同じ実物の重複撮影か、未確認の別の複本かを確認してください。';
   }else{
     msg.textContent='母表に同一書誌の資料が複数あります。資料番号を確認して、該当する1冊を選択してください。';
   }
@@ -536,7 +564,12 @@ el('confirmReviewBtn').addEventListener('click',async()=>{
   if(!selectedBookId) return setStatus('reviewStatus','母表候補を選択してください。候補がない場合は「該当なし」を押してください。','error');
   if(allBooksById[selectedBookId]?.status==='confirmed'){
     renderDuplicateWarning(selectedBookId);
-    return setStatus('reviewStatus','この母表項目はすでに確認済みです。重複撮影として除外するか、未確認の別資料を選択してください。','error');
+    const d=reviewQueue[reviewIndex];
+    const b=allBooksById[selectedBookId];
+    const msg=wasConfirmedAfterScanStarted(b,d?.scan_id||currentScanId)
+      ? 'このスキャン開始後にこの母表項目が確認されています。同じ本の二重検出なら重複撮影として除外し、別の複本なら未確認の資料を選択してください。'
+      : 'このスキャンより前から確認済みの母表項目です。重複撮影として除外するか、未確認の別資料を選択してください。';
+    return setStatus('reviewStatus',msg,'error');
   }
   const btn=el('confirmReviewBtn'); btn.disabled=true;
   try{
@@ -721,7 +754,7 @@ el('resetAllBtn').addEventListener('click',async()=>{
   try{
     setStatus('resetStatus','全データをリセットしています。画面を閉じないでください…');
     const result=await callFunction({action:'reset_all',password,confirm_text:confirmText});
-    selectedFile=null; resizedBlob=null; currentScanId=null; currentScanImagePath=null; reviewQueue=[]; reviewIndex=0; imageCache.clear();
+    selectedFile=null; resizedBlob=null; currentScanId=null; currentScanImagePath=null; reviewQueue=[]; reviewIndex=0; imageCache.clear(); scanCreatedAtById.clear();
     el('preview').classList.add('hidden'); el('summaryCard').classList.add('hidden'); el('cameraPhoto').value=''; el('libraryPhoto').value='';
     el('resetPassword').value=''; el('resetConfirmText').value='';
     await loadAllBooks(); await refreshProgress();
