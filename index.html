@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>図書実査スキャナー</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f6f7f9; color: #202124; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 18px; }
+    h1 { font-size: 1.45rem; margin: 0 0 10px; }
+    h2 { font-size: 1.05rem; margin-top: 22px; }
+    .card { background: white; border-radius: 14px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 5px rgba(0,0,0,.08); }
+    label { display:block; font-weight: 600; margin: 10px 0 6px; }
+    input, button { width: 100%; box-sizing: border-box; font-size: 16px; border-radius: 10px; }
+    input { border: 1px solid #cfd3d8; padding: 12px; background: white; }
+    input[type=file] { padding: 10px; }
+    button { border: 0; padding: 13px; margin-top: 10px; background: #1f6feb; color: white; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #5f6368; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .hidden { display:none !important; }
+    .muted { color:#6b7280; font-size:.9rem; }
+    .ok { color:#137333; }
+    .warn { color:#b06000; }
+    .error { color:#b3261e; white-space: pre-wrap; }
+    .progress { display:grid; grid-template-columns: repeat(3,1fr); gap:8px; margin-top:10px; }
+    .metric { background:#f1f3f4; padding:10px; border-radius:10px; text-align:center; }
+    .metric strong { display:block; font-size:1.2rem; }
+    .result { border-left:5px solid #f4b400; padding:10px 12px; background:#fff8dd; border-radius:8px; margin:10px 0; }
+    .result.auto { border-left-color:#34a853; background:#eef8f0; }
+    .result .title { font-weight:700; }
+    .candidate { margin-top:8px; padding-top:8px; border-top:1px solid rgba(0,0,0,.08); }
+    .thumb { max-width:100%; border-radius:10px; margin-top:8px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#e8eaed; font-size:.8rem; margin-right:5px; }
+    .statusline { min-height: 1.4em; margin-top:10px; }
+    .smallbtn { width:auto; padding:8px 12px; margin-right:8px; margin-top:8px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>図書実査スキャナー</h1>
+  <div class="muted">棚1段・15〜20冊程度が画面いっぱいに入るように撮影してください。</div>
+
+  <section id="loginCard" class="card">
+    <h2>ログイン</h2>
+    <label for="email">メールアドレス</label>
+    <input id="email" type="email" autocomplete="username" />
+    <label for="password">パスワード</label>
+    <input id="password" type="password" autocomplete="current-password" />
+    <button id="loginBtn">ログイン</button>
+    <div id="loginStatus" class="statusline muted"></div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="card">
+      <div><strong id="userEmail"></strong></div>
+      <div class="progress">
+        <div class="metric">確認済<strong id="confirmedCount">-</strong></div>
+        <div class="metric">要確認<strong id="reviewCount">-</strong></div>
+        <div class="metric">未確認<strong id="unseenCount">-</strong></div>
+      </div>
+      <button id="refreshBtn" class="secondary">進捗を更新</button>
+      <button id="logoutBtn" class="secondary">ログアウト</button>
+    </div>
+
+    <div class="card">
+      <h2>写真をアップロード</h2>
+      <label for="shelfLabel">棚番号・場所（任意）</label>
+      <input id="shelfLabel" type="text" placeholder="例：A-03 上段" />
+
+      <label for="photo">写真</label>
+      <input id="photo" type="file" accept="image/*" capture="environment" />
+      <img id="preview" class="thumb hidden" alt="選択画像プレビュー" />
+
+      <button id="scanBtn">アップロードしてAIで確認</button>
+      <div id="scanStatus" class="statusline muted"></div>
+    </div>
+
+    <div id="summaryCard" class="card hidden">
+      <h2>解析結果</h2>
+      <div id="summary"></div>
+      <div id="detections"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://ouokjjfjiivdsyyzydsu.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_lx7GbjmaxtqXGfM9zRLe4w_2fZTPFGk';
+const BUCKET = 'library-scans';
+const FUNCTION_NAME = 'library-scan';
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+
+const el = (id) => document.getElementById(id);
+const loginCard = el('loginCard');
+const app = el('app');
+let currentUser = null;
+let resizedBlob = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+function setStatus(id, msg, cls='muted') {
+  const node = el(id);
+  node.className = 'statusline ' + cls;
+  node.textContent = msg;
+}
+
+async function restoreSession() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) {
+    currentUser = session.user;
+    enterApp();
+  }
+}
+
+async function enterApp() {
+  loginCard.classList.add('hidden');
+  app.classList.remove('hidden');
+  el('userEmail').textContent = currentUser.email ?? 'ログイン中';
+  await refreshProgress();
+}
+
+el('loginBtn').addEventListener('click', async () => {
+  const email = el('email').value.trim();
+  const password = el('password').value;
+  if (!email || !password) return setStatus('loginStatus', 'メールアドレスとパスワードを入力してください。', 'error');
+  el('loginBtn').disabled = true;
+  setStatus('loginStatus', 'ログイン中…');
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  el('loginBtn').disabled = false;
+  if (error) return setStatus('loginStatus', error.message, 'error');
+  currentUser = data.user;
+  setStatus('loginStatus', 'ログインしました。', 'ok');
+  await enterApp();
+});
+
+el('logoutBtn').addEventListener('click', async () => {
+  await sb.auth.signOut();
+  currentUser = null;
+  app.classList.add('hidden');
+  loginCard.classList.remove('hidden');
+});
+
+el('refreshBtn').addEventListener('click', refreshProgress);
+
+async function countByStatus(status) {
+  const { count, error } = await sb
+    .from('books')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', status);
+  if (error) throw error;
+  return count ?? 0;
+}
+
+async function refreshProgress() {
+  try {
+    const [confirmed, review, unseen] = await Promise.all([
+      countByStatus('confirmed'),
+      countByStatus('needs_review'),
+      countByStatus('unseen')
+    ]);
+    el('confirmedCount').textContent = confirmed;
+    el('reviewCount').textContent = review;
+    el('unseenCount').textContent = unseen;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+el('photo').addEventListener('change', async (ev) => {
+  const file = ev.target.files?.[0];
+  resizedBlob = null;
+  if (!file) {
+    el('preview').classList.add('hidden');
+    return;
+  }
+  setStatus('scanStatus', '画像を準備しています…');
+  try {
+    resizedBlob = await resizeImage(file, 2000, 0.85);
+    el('preview').src = URL.createObjectURL(resizedBlob);
+    el('preview').classList.remove('hidden');
+    setStatus('scanStatus', `準備完了（約 ${(resizedBlob.size/1024/1024).toFixed(2)} MB）`, 'ok');
+  } catch (e) {
+    console.error(e);
+    setStatus('scanStatus', '画像の準備に失敗しました: ' + e.message, 'error');
+  }
+});
+
+function resizeImage(file, maxSide=2000, quality=0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const scale = Math.min(1, maxSide / Math.max(w, h));
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob(blob => {
+          URL.revokeObjectURL(url);
+          if (!blob) return reject(new Error('JPEG変換に失敗しました'));
+          resolve(blob);
+        }, 'image/jpeg', quality);
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error('画像を読み込めませんでした'));
+    img.src = url;
+  });
+}
+
+el('scanBtn').addEventListener('click', async () => {
+  if (!currentUser) return;
+  const file = el('photo').files?.[0];
+  if (!file) return setStatus('scanStatus', '写真を選択してください。', 'error');
+  if (!resizedBlob) return setStatus('scanStatus', '画像の準備が終わるまで少しお待ちください。', 'error');
+
+  const btn = el('scanBtn');
+  btn.disabled = true;
+  el('summaryCard').classList.add('hidden');
+  setStatus('scanStatus', '1/3 写真をアップロードしています…');
+
+  try {
+    const d = new Date();
+    const ymd = d.toISOString().slice(0,10);
+    const path = `${currentUser.id}/${ymd}/${crypto.randomUUID()}.jpg`;
+
+    const { error: uploadError } = await sb.storage
+      .from(BUCKET)
+      .upload(path, resizedBlob, { contentType: 'image/jpeg', upsert: false });
+    if (uploadError) throw uploadError;
+
+    setStatus('scanStatus', '2/3 AIが本を認識しています…（少し時間がかかります）');
+    const { data, error } = await sb.functions.invoke(FUNCTION_NAME, {
+      body: {
+        imagePath: path,
+        shelfLabel: el('shelfLabel').value.trim()
+      }
+    });
+    if (error) throw error;
+    if (data?.error) throw new Error(data.error);
+
+    setStatus('scanStatus', '3/3 候補を読み込んでいます…');
+    const detections = data?.detections ?? [];
+    const ids = [...new Set(detections.map(x => x.candidate_book_id).filter(Boolean))];
+    let candidates = {};
+    if (ids.length) {
+      const { data: books, error: bookError } = await sb
+        .from('books')
+        .select('id,title,author,call_number,volume,status,source_row')
+        .in('id', ids);
+      if (bookError) throw bookError;
+      candidates = Object.fromEntries((books ?? []).map(b => [b.id, b]));
+    }
+
+    renderResults(data.summary ?? {}, detections, candidates);
+    setStatus('scanStatus', '解析が完了しました。', 'ok');
+    await refreshProgress();
+  } catch (e) {
+    console.error(e);
+    const extra = e?.context?.body ? `\n${JSON.stringify(e.context.body)}` : '';
+    setStatus('scanStatus', 'エラー: ' + (e.message ?? String(e)) + extra, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderResults(summary, detections, candidates) {
+  el('summaryCard').classList.remove('hidden');
+  el('summary').innerHTML = `
+    <div class="progress">
+      <div class="metric">検出<strong>${esc(summary.total_detected ?? detections.length)}</strong></div>
+      <div class="metric">自動確認<strong>${esc(summary.auto_confirmed ?? 0)}</strong></div>
+      <div class="metric">要確認<strong>${esc(summary.needs_review ?? 0)}</strong></div>
+    </div>`;
+
+  el('detections').innerHTML = detections.map((d, i) => {
+    const b = candidates[d.candidate_book_id];
+    const auto = d.decision === 'auto_confirmed';
+    return `<div class="result ${auto ? 'auto' : ''}">
+      <div><span class="pill">左から ${i+1}</span><span class="pill">score ${esc(d.match_score ?? 0)}</span></div>
+      <div class="title">AI読取：${esc(d.detected_title || '（書名不明）')}</div>
+      <div>${esc(d.detected_author || '')}</div>
+      <div><strong>請求記号：</strong>${esc(d.detected_call_number || '不明')}</div>
+      <div><strong>判定：</strong>${esc(d.decision)}</div>
+      ${b ? `<div class="candidate">
+        <div><strong>母表候補：</strong>${esc(b.title || '（書名なし）')}</div>
+        <div>${esc(b.author || '')}</div>
+        <div><strong>請求記号：</strong>${esc(b.call_number || '')}</div>
+        <div class="muted">books.id=${esc(b.id)} / 元Excel行=${esc(b.source_row ?? '')} / 現在=${esc(b.status)}</div>
+      </div>` : '<div class="candidate warn">母表候補なし</div>'}
+    </div>`;
+  }).join('');
+}
+
+restoreSession();
+</script>
+</body>
+</html>
