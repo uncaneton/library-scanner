@@ -259,7 +259,7 @@ async function loadAllBooks(){
   const rows=[]; const step=1000;
   for(let from=0;;from+=step){
     const {data,error}=await sb.from('books')
-      .select('id,source_row,item_number,inventory_number,title,classification_number,author_code,volume_label,status')
+      .select('id,source_row,item_number,inventory_number,title,classification_number,author_code,volume_code,volume_label,ledger_number,remarks,status,confirmed_at,confirmed_by')
       .range(from,from+step-1);
     if(error) throw error;
     rows.push(...(data??[]));
@@ -649,8 +649,22 @@ async function downloadUpdatedXlsx(statusId='downloadStatus'){
     const green={type:'pattern',pattern:'solid',fgColor:{argb:'FFC6EFCE'}};
     const yellow={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFE699'}};
     const pink={type:'pattern',pattern:'solid',fgColor:{argb:'FFF4CCCC'}};
+
+    // GitHub上のXLSXはレイアウト用テンプレートとしてのみ使用する。
+    // ダウンロード時に「資料リスト」の実データ A～J を Supabase の最新 books テーブルで上書きする。
     for(const b of allBooks){
       const row=Number(b.source_row); if(!row||row<2) continue;
+
+      ws.getCell(`A${row}`).value=b.item_number ?? '';
+      ws.getCell(`B${row}`).value=b.inventory_number ?? '';
+      ws.getCell(`D${row}`).value=b.title ?? '';
+      ws.getCell(`E${row}`).value=b.classification_number ?? '';
+      ws.getCell(`F${row}`).value=b.author_code ?? '';
+      ws.getCell(`G${row}`).value=b.volume_code ?? '';
+      ws.getCell(`H${row}`).value=b.volume_label ?? '';
+      ws.getCell(`I${row}`).value=b.ledger_number ?? '';
+      ws.getCell(`J${row}`).value=b.remarks ?? '';
+
       const cell=ws.getCell(`C${row}`);
       cell.alignment={...(cell.alignment||{}),horizontal:'center',vertical:'middle'};
       if(b.status==='confirmed'){
@@ -661,13 +675,37 @@ async function downloadUpdatedXlsx(statusId='downloadStatus'){
         cell.value=''; cell.fill=pink;
       }
     }
+
+    // Supabaseの内容そのものを確認できる生データ・スナップショットも毎回作り直す。
+    const oldSnapshot=wb.getWorksheet('Supabase最新データ');
+    if(oldSnapshot) wb.removeWorksheet(oldSnapshot.id);
+    const snap=wb.addWorksheet('Supabase最新データ');
+    const snapHeaders=['DB ID','元Excel行','項番','資料番号','書名','分類記号','著者記号','巻次記号','巻号','原簿番号','備考','状態','確認日時'];
+    snap.addRow(snapHeaders);
+    const ordered=[...allBooks].sort((a,b)=>(Number(a.source_row)||999999)-(Number(b.source_row)||999999));
+    for(const b of ordered){
+      snap.addRow([
+        b.id ?? '', b.source_row ?? '', b.item_number ?? '', b.inventory_number ?? '', b.title ?? '',
+        b.classification_number ?? '', b.author_code ?? '', b.volume_code ?? '', b.volume_label ?? '',
+        b.ledger_number ?? '', b.remarks ?? '', b.status ?? '', jpDateTime(b.confirmed_at)
+      ]);
+    }
+    const sh=snap.getRow(1);
+    sh.font={bold:true,color:{argb:'FFFFFFFF'}};
+    sh.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF44546A'}};
+    sh.alignment={vertical:'middle',horizontal:'center'};
+    snap.views=[{state:'frozen',ySplit:1}];
+    [10,10,10,18,48,14,14,14,18,16,28,18,22].forEach((w,i)=>snap.getColumn(i+1).width=w);
+    snap.eachRow((r,n)=>{ if(n>1) r.alignment={vertical:'top',wrapText:true}; });
+    snap.autoFilter={from:{row:1,column:1},to:{row:1,column:snapHeaders.length}};
+
     await addAuditSheet(wb);
     const out=await wb.xlsx.writeBuffer();
     const blob=new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
     const d=new Date(); const stamp=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}`;
     a.download=`公用貸出実査リスト_更新_${stamp}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-    setStatus(statusId,'最新状態のXLSXを作成しました。緑（○）=確認済、黄色=要確認、ピンク=未確認です。「点検履歴」シートにアカウント・日時・判定履歴も記録しています。','ok');
+    setStatus(statusId,'Supabaseの最新データからXLSXを作成しました。資料リスト本体もDB内容で更新し、緑（○）=確認済、黄色=要確認、ピンク=未確認です。「Supabase最新データ」と「点検履歴」も付加しています。','ok');
   }catch(e){ setStatus(statusId,'XLSX作成エラー: '+e.message,'error'); throw e; }
 }
 
