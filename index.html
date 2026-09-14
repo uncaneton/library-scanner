@@ -15,8 +15,8 @@
     h3 { font-size:1rem; margin:12px 0 6px; }
     .card { background:#fff; border-radius:14px; padding:16px; margin:12px 0; box-shadow:0 1px 5px rgba(0,0,0,.08); }
     label { display:block; font-weight:650; margin:10px 0 6px; }
-    input, button { width:100%; box-sizing:border-box; font-size:16px; border-radius:10px; }
-    input { border:1px solid #cfd3d8; padding:12px; background:#fff; }
+    input, select, button { width:100%; box-sizing:border-box; font-size:16px; border-radius:10px; }
+    input, select { border:1px solid #cfd3d8; padding:12px; background:#fff; }
     input[type=file] { padding:10px; }
     button { border:0; padding:13px; margin-top:10px; background:#1f6feb; color:#fff; font-weight:700; cursor:pointer; }
     button.secondary { background:#5f6368; }
@@ -60,12 +60,12 @@
     .danger-note { background:#fff1f0; border-left:5px solid #b3261e; padding:10px 12px; border-radius:8px; margin:10px 0; }
     @media(max-width:560px){ .progress { grid-template-columns:1fr; } }
   </style>
-  <!-- Library Scanner v3.7: distinguish pre-existing confirmations from confirmations made after the current scan started -->
+  <!-- Library Scanner v3.8: two-row photos are split into upper/lower row and analyzed separately -->
 </head>
 <body>
 <div class="wrap">
   <h1>大阪大学比較対照言語学研究室・図書点検</h1>
-  <div class="muted">棚1段・15〜20冊程度が画面いっぱいに入るように撮影してください。</div>
+  <div class="muted">棚1段・15〜20冊程度を推奨します。2段が写る写真は「2段」を選ぶと上段・下段に分けて解析します。</div>
 
   <section id="loginCard" class="card">
     <h2>ログイン</h2>
@@ -110,6 +110,12 @@
         <h2>写真をアップロード</h2>
         <label for="shelfLabel">棚番号・場所（任意）</label>
         <input id="shelfLabel" type="text" placeholder="例：A-03 上段" />
+        <label for="rowMode">写真に写っている棚の段数</label>
+        <select id="rowMode">
+          <option value="1" selected>1段（推奨）</option>
+          <option value="2">2段（上段・下段に自動分割）</option>
+        </select>
+        <div class="muted" style="margin-top:6px;">2段を選ぶと、1枚の写真を上段・下段の2枚に分け、APIを2回に分けて解析します。</div>
         <label>写真</label>
         <div class="muted">カメラで撮影、または写真ライブラリから選択できます。</div>
         <input id="cameraPhoto" type="file" accept="image/*" capture="environment" />
@@ -188,9 +194,11 @@ const el = id => document.getElementById(id);
 let currentUser = null;
 let currentRole = 'worker';
 let selectedFile = null;
-let resizedBlob = null;
+let resizedBlob = null; // 互換用：1段時は先頭画像
+let preparedParts = []; // [{blob,label}]
 let currentScanId = null;
 let currentScanImagePath = null;
+let currentBatchScanIds = [];
 let reviewQueue = [];
 let reviewIndex = 0;
 let selectedBookId = null;
@@ -287,35 +295,65 @@ async function refreshProgress(){
   }catch(e){ console.error(e); }
 }
 
-function resizeImage(file,maxSide=2400,quality=.90){
+function loadImageFromFile(file){
   return new Promise((resolve,reject)=>{
     const img=new Image(), url=URL.createObjectURL(file);
-    img.onload=()=>{
-      try{
-        let w=img.naturalWidth,h=img.naturalHeight; const scale=Math.min(1,maxSide/Math.max(w,h));
-        w=Math.round(w*scale); h=Math.round(h*scale);
-        const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h;
-        canvas.getContext('2d').drawImage(img,0,0,w,h);
-        canvas.toBlob(blob=>{ URL.revokeObjectURL(url); blob?resolve(blob):reject(new Error('JPEG変換失敗')); },'image/jpeg',quality);
-      }catch(e){reject(e)}
-    };
-    img.onerror=()=>reject(new Error('画像を読み込めませんでした')); img.src=url;
+    img.onload=()=>resolve({img,url});
+    img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
+    img.src=url;
   });
 }
 
+function canvasBlob(canvas,quality=.90){
+  return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('JPEG変換失敗')),'image/jpeg',quality));
+}
+
+async function cropAndResize(img, sx, sy, sw, sh, maxSide=2400, quality=.90){
+  const scale=Math.min(1,maxSide/Math.max(sw,sh));
+  const w=Math.max(1,Math.round(sw*scale)), h=Math.max(1,Math.round(sh*scale));
+  const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h;
+  canvas.getContext('2d').drawImage(img,sx,sy,sw,sh,0,0,w,h);
+  return await canvasBlob(canvas,quality);
+}
+
+async function buildPreparedParts(file){
+  const mode=el('rowMode').value;
+  const {img,url}=await loadImageFromFile(file);
+  try{
+    const w=img.naturalWidth,h=img.naturalHeight;
+    if(mode==='2'){
+      // 中央付近を8%重複させ、棚板位置の多少のずれを吸収する。
+      const overlap=Math.round(h*0.08);
+      const split=Math.round(h*0.50);
+      const topH=Math.min(h,split+overlap/2);
+      const bottomY=Math.max(0,split-overlap/2);
+      const bottomH=h-bottomY;
+      return [
+        {label:'上段',blob:await cropAndResize(img,0,0,w,topH)},
+        {label:'下段',blob:await cropAndResize(img,0,bottomY,w,bottomH)},
+      ];
+    }
+    return [{label:'',blob:await cropAndResize(img,0,0,w,h)}];
+  } finally { URL.revokeObjectURL(url); }
+}
+
 async function preparePhoto(file,source){
-  selectedFile=file??null; resizedBlob=null;
-  if(source==='camera') el('libraryPhoto').value=''; else el('cameraPhoto').value='';
+  selectedFile=file??null; resizedBlob=null; preparedParts=[];
+  if(source==='camera') el('libraryPhoto').value=''; else if(source==='library') el('cameraPhoto').value='';
   if(!selectedFile){ el('preview').classList.add('hidden'); return; }
   setStatus('scanStatus','画像を準備しています…');
   try{
-    resizedBlob=await resizeImage(selectedFile);
-    el('preview').src=URL.createObjectURL(resizedBlob); el('preview').classList.remove('hidden');
-    setStatus('scanStatus',`準備完了（約 ${(resizedBlob.size/1024/1024).toFixed(2)} MB）`,'ok');
+    preparedParts=await buildPreparedParts(selectedFile);
+    resizedBlob=preparedParts[0]?.blob??null;
+    el('preview').src=URL.createObjectURL(selectedFile); el('preview').classList.remove('hidden');
+    const size=preparedParts.reduce((a,x)=>a+x.blob.size,0)/1024/1024;
+    const modeText=preparedParts.length===2?'2段として上段・下段に分割して解析します':'1段として解析します';
+    setStatus('scanStatus',`準備完了：${modeText}（送信画像 合計約 ${size.toFixed(2)} MB）`,'ok');
   }catch(e){ setStatus('scanStatus','画像準備に失敗: '+e.message,'error'); }
 }
 el('cameraPhoto').addEventListener('change',e=>preparePhoto(e.target.files?.[0],'camera'));
 el('libraryPhoto').addEventListener('change',e=>preparePhoto(e.target.files?.[0],'library'));
+el('rowMode').addEventListener('change',()=>{ if(selectedFile) preparePhoto(selectedFile,'mode'); });
 
 async function callFunction(payload){
   const {data:{session}}=await sb.auth.getSession();
@@ -332,48 +370,47 @@ async function callFunction(payload){
 }
 
 el('scanBtn').addEventListener('click',async()=>{
-  if(!currentUser || !selectedFile || !resizedBlob) return setStatus('scanStatus','写真を選択してください。','error');
+  if(!currentUser || !selectedFile || !preparedParts.length) return setStatus('scanStatus','写真を選択してください。','error');
   const btn=el('scanBtn'); btn.disabled=true; el('summaryCard').classList.add('hidden');
+  currentBatchScanIds=[];
   try{
-    setStatus('scanStatus','1/4 写真をアップロードしています…');
+    const baseShelf=el('shelfLabel').value.trim();
+    let mergedDetections=[];
+    const mergedSummary={total_detected:0,auto_confirmed:0,needs_review:0};
     const ymd=new Date().toISOString().slice(0,10);
-    const path=`${currentUser.id}/${ymd}/${crypto.randomUUID()}.jpg`;
-    const {error:uploadError}=await sb.storage.from(BUCKET).upload(path,resizedBlob,{contentType:'image/jpeg',upsert:false});
-    if(uploadError) throw uploadError;
 
-    setStatus('scanStatus','2/4 スキャン記録を作成しています…');
-    const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,uploader_email:currentUser.email||null,shelf_label:el('shelfLabel').value.trim(),image_path:path}).select().single();
-    if(scanError) throw scanError;
-    currentScanId=scan.id; currentScanImagePath=path;
-    if(scan.created_at) scanCreatedAtById.set(scan.id, scan.created_at);
+    for(let i=0;i<preparedParts.length;i++){
+      const part=preparedParts[i];
+      const n=preparedParts.length;
+      setStatus('scanStatus',`${i+1}/${n} ${part.label||'写真'}：アップロードしています…`);
+      const path=`${currentUser.id}/${ymd}/${crypto.randomUUID()}-${part.label||'single'}.jpg`;
+      const {error:uploadError}=await sb.storage.from(BUCKET).upload(path,part.blob,{contentType:'image/jpeg',upsert:false});
+      if(uploadError) throw uploadError;
 
-    setStatus('scanStatus','3/4 AIが本を認識して母表と照合しています…');
-    const result=await callFunction({action:'analyze',scan_id:scan.id,storage_path:path});
+      const shelfLabel=[baseShelf,part.label].filter(Boolean).join(' ');
+      setStatus('scanStatus',`${i+1}/${n} ${part.label||'写真'}：スキャン記録を作成しています…`);
+      const {data:scan,error:scanError}=await sb.from('scans').insert({uploaded_by:currentUser.id,uploader_email:currentUser.email||null,shelf_label:shelfLabel,image_path:path}).select().single();
+      if(scanError) throw scanError;
+      currentBatchScanIds.push(scan.id);
+      if(i===0){ currentScanId=scan.id; currentScanImagePath=path; }
+      if(scan.created_at) scanCreatedAtById.set(scan.id,scan.created_at);
 
-    setStatus('scanStatus','4/4 結果を反映しています…');
+      setStatus('scanStatus',`${i+1}/${n} ${part.label||'写真'}：AIが本を認識して母表と照合しています…`);
+      const result=await callFunction({action:'analyze',scan_id:scan.id,storage_path:path});
+      mergedDetections.push(...(result.detections??[]));
+      mergedSummary.total_detected += Number(result.summary?.total_detected??result.detections?.length??0);
+      mergedSummary.auto_confirmed += Number(result.summary?.auto_confirmed??0);
+      mergedSummary.needs_review += Number(result.summary?.needs_review??0);
+    }
+
+    setStatus('scanStatus','結果を総表に反映しています…');
     await loadAllBooks();
     await refreshProgress();
-    renderScanSummary(result.summary??{}, result.detections??[]);
-    setStatus('scanStatus','解析完了。総表の状態にも反映されました。','ok');
+    renderScanSummary(mergedSummary, mergedDetections);
+    setStatus('scanStatus',preparedParts.length===2?'解析完了。上段・下段を別々に解析し、結果を統合しました。':'解析完了。総表の状態にも反映されました。','ok');
   }catch(e){ console.error(e); setStatus('scanStatus','エラー: '+(e.message??String(e)),'error'); }
   finally{ btn.disabled=false; }
 });
-
-function wasConfirmedAfterScanStarted(book, scanId){
-  if(!book || book.status!=='confirmed' || !book.confirmed_at || !scanId) return false;
-  const started=scanCreatedAtById.get(scanId);
-  if(!started) return false;
-  const c=new Date(book.confirmed_at).getTime();
-  const s=new Date(started).getTime();
-  return Number.isFinite(c) && Number.isFinite(s) && c >= (s-2000);
-}
-
-function confirmedWarningText(book, scanId){
-  if(wasConfirmedAfterScanStarted(book,scanId)){
-    return '⚠ このスキャン開始後に確認された候補です。同じ写真内で同じ本が二重に検出された可能性があります。';
-  }
-  return '⚠ このスキャンより前から確認済みの候補です。重複撮影の可能性があります。';
-}
 
 function renderScanSummary(summary,detections){
   el('summaryCard').classList.remove('hidden');
@@ -396,16 +433,16 @@ function renderScanSummary(summary,detections){
   el('startCurrentReviewBtn').disabled=(summary.needs_review??0)===0;
 }
 
-el('startCurrentReviewBtn').addEventListener('click',()=>startReview({scanId:currentScanId}));
+el('startCurrentReviewBtn').addEventListener('click',()=>startReview({scanIds:currentBatchScanIds.length?currentBatchScanIds:[currentScanId].filter(Boolean)}));
 el('skipCurrentReviewBtn').addEventListener('click',()=>{ el('summaryCard').classList.add('hidden'); });
 el('resumeReviewBtn').addEventListener('click',()=>startReview({scanId:null}));
 el('backHomeBtn').addEventListener('click',showHome);
 
-async function startReview({scanId=null}={}){
+async function startReview({scanId=null,scanIds=null}={}){
   try{
     setStatus('scanStatus','要確認データを読み込んでいます…');
     let q=sb.from('detections').select('id,scan_id,detected_title,detected_author,detected_call_number,candidate_book_id,match_score,decision,bbox,legibility,raw_detected,candidates').eq('decision','needs_review');
-    if(scanId) q=q.eq('scan_id',scanId);
+    if(Array.isArray(scanIds) && scanIds.length) q=q.in('scan_id',scanIds); else if(scanId) q=q.eq('scan_id',scanId);
     const {data,error}=await q.order('match_score',{ascending:false,nullsFirst:false}).limit(500);
     if(error) throw error;
     reviewQueue=data??[]; reviewIndex=0;
@@ -754,7 +791,7 @@ el('resetAllBtn').addEventListener('click',async()=>{
   try{
     setStatus('resetStatus','全データをリセットしています。画面を閉じないでください…');
     const result=await callFunction({action:'reset_all',password,confirm_text:confirmText});
-    selectedFile=null; resizedBlob=null; currentScanId=null; currentScanImagePath=null; reviewQueue=[]; reviewIndex=0; imageCache.clear(); scanCreatedAtById.clear();
+    selectedFile=null; resizedBlob=null; preparedParts=[]; currentScanId=null; currentScanImagePath=null; currentBatchScanIds=[]; reviewQueue=[]; reviewIndex=0; imageCache.clear(); scanCreatedAtById.clear();
     el('preview').classList.add('hidden'); el('summaryCard').classList.add('hidden'); el('cameraPhoto').value=''; el('libraryPhoto').value='';
     el('resetPassword').value=''; el('resetConfirmText').value='';
     await loadAllBooks(); await refreshProgress();
